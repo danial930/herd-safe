@@ -1,7 +1,11 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { buildCheckpointsData, validateFarmFormInput } from "@/lib/farms/createFarm";
-import { spawnFarmPipeline } from "@/lib/ingestion/spawnPipeline";
+import { runFarmPipeline } from "@/lib/ingestion/runFarmPipeline";
+
+// See app/api/farms/route.ts for why this is set and why the pipeline runs
+// via after() rather than a spawned background process.
+export const maxDuration = 300;
 
 /** GET /api/farms/:id — Dashboard header + Edit Farm prefill. Read-only
  * against Postgres. */
@@ -61,7 +65,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     }),
   ]);
 
-  spawnFarmPipeline(id);
+  after(() => runFarmPipeline(id));
 
   const farm = await prisma.farm.findUnique({ where: { id }, include: { checkpoints: true } });
   return NextResponse.json({ farm });

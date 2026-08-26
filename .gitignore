@@ -40,9 +40,6 @@ yarn-error.log*
 # ingestion outputs (e.g. downloaded heat-intelligence PDFs)
 /outputs
 
-# per-run pipeline logs (see lib/ingestion/spawnPipeline.ts)
-/logs
-
 # vercel
 .vercel
 
@@ -53,3 +50,5 @@ next-env.d.ts
 # generated Prisma client
 /lib/generated/prisma
 PROJECT_GUIDE.md
+# local debug logs (no longer written by the app, but keep out of git if you add your own)
+/logs

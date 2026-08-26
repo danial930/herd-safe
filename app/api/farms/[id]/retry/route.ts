@@ -1,6 +1,10 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { spawnFarmPipeline } from "@/lib/ingestion/spawnPipeline";
+import { runFarmPipeline } from "@/lib/ingestion/runFarmPipeline";
+
+// See app/api/farms/route.ts for why this is set and why the pipeline runs
+// via after() rather than a spawned background process.
+export const maxDuration = 300;
 
 /**
  * POST /api/farms/:id/retry — the Processing screen's "Retry" action
@@ -26,7 +30,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     where: { id },
     data: { status: "processing", statusStage: null, statusError: null, statusErrorCategory: null },
   });
-  spawnFarmPipeline(id);
+  after(() => runFarmPipeline(id));
 
   return NextResponse.json({ ok: true });
 }

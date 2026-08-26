@@ -58,10 +58,6 @@ entirely by the FortyGuard tOS Enterprise API.
   `PROJECT_GUIDE.md` Section 0.5 rather than the auto-derived straight-line
   average — an explicit override scoped to `prisma/seed.ts` only (see
   [Demo farm data](#demo-farm-data--why-its-synthetic)).
-- **Background pipeline spawning** uses a detached Node child process, which
-  only works on a long-running server (`next dev` / `next start`). It will
-  **not** work on Vercel's serverless platform as-is — a real deployment
-  needs a queue/worker (see [Deployment scope](#deployment-scope)).
 
 ## Resolved since the first pass
 
@@ -505,13 +501,24 @@ wide hunt.
 
 ## Deployment scope
 
-This was built and tested for **local development**. Everything is
-env-var-driven so swapping to a hosted Postgres (Neon/Supabase/Railway) is a
-one-line `.env` change. The one piece that genuinely needs rework for a
-Vercel deployment: `lib/ingestion/spawnPipeline.ts`'s detached child process
-only survives on a long-running server — Vercel's serverless functions exit
-once the response is sent. A real deployment needs a queue (e.g. a Vercel
-Cron-triggered worker, or a proper job queue) instead.
+Deployed on Vercel, backed by Supabase Postgres (two connection strings —
+`DATABASE_URL`, pooled via Supavisor/PgBouncer, for the app's own queries;
+`DIRECT_URL`, non-pooled, for Prisma Migrate — see `prisma.config.ts` and
+`lib/db.ts`).
+
+The ingestion pipeline originally kicked off as a detached Node child
+process (`lib/ingestion/spawnPipeline.ts`), which only survives on a
+long-running server (`next dev` / `next start`) — confirmed broken in
+production (`ENOENT` trying to write a log file into the deployed bundle's
+read-only filesystem). Replaced with Next.js's `after()` (stable since
+15.1.0): the pipeline now runs in-process, after the response is sent,
+within the same serverless invocation (Vercel wires this to its own
+`waitUntil` automatically) — see `lib/ingestion/runFarmPipeline.ts`. Each
+calling route sets `maxDuration = 300` accordingly. If a run somehow exceeds
+that, the farm is left in `"processing"` and the existing Retry action
+recovers it manually — there's no automatic queue/retry infrastructure
+beyond that, which is a reasonable tradeoff at this scale but the thing to
+revisit first if farm creation ever needs to be more failure-tolerant.
 
 ## Claude Code disclosure
 
