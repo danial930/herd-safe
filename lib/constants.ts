@@ -8,11 +8,19 @@
 // ---------------------------------------------------------------------------
 // FortyGuard API
 // ---------------------------------------------------------------------------
-
-export const FORTYGUARD_BASE_URL =
-  process.env.FORTYGUARD_BASE_URL || "https://api.fortyguard.com";
-
-export const FORTYGUARD_API_KEY = process.env.FORTYGUARD_API_KEY;
+//
+// FORTYGUARD_API_KEY/FORTYGUARD_BASE_URL deliberately do NOT live here, even
+// though every other constant in the app does (see the file-level rule
+// above) — this file is imported by client components too (e.g.
+// RiskGauge.tsx via THI_BANDS below), and a production build confirmed that
+// pulls the WHOLE module into the browser bundle, including
+// `process.env.FORTYGUARD_API_KEY`/`FORTYGUARD_BASE_URL` references (the
+// literal secret VALUE is never inlined — Next.js only does that for
+// NEXT_PUBLIC_-prefixed vars — but the reference itself has no business
+// shipping to the browser at all). Both now live directly in
+// lib/fortyguard/client.ts, the only file that ever reads them, which is
+// itself never imported by any "use client" component (verified directly
+// against a real build's client chunks, not assumed).
 
 /** date_time.filter_type values shared by /v1/heatmap and /v1/env_params. */
 export const FILTER_TYPE = {

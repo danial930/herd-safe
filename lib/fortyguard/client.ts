@@ -20,12 +20,7 @@
  *   minutes.
  */
 
-import {
-  FORTYGUARD_API_KEY,
-  FORTYGUARD_BASE_URL,
-  FORTYGUARD_POLL,
-  FORTYGUARD_REQUEST_TIMEOUT_MS,
-} from "@/lib/constants";
+import { FORTYGUARD_POLL, FORTYGUARD_REQUEST_TIMEOUT_MS } from "@/lib/constants";
 import {
   ActivityNotReadyError,
   FortyGuardError,
@@ -47,6 +42,15 @@ import type {
   SubmitEnvelope,
 } from "./types";
 import { ENV_PARAMS_ANALYSES } from "./types";
+
+// Deliberately NOT in lib/constants.ts (which client components also
+// import from — see that file's FortyGuard API section for why) even
+// though every other constant in the app lives there. This is the only
+// file that reads them, and this file is never imported by any "use
+// client" component (PROJECT_GUIDE.md Section 7, rule 2: the sole caller
+// of api.fortyguard.com).
+const FORTYGUARD_BASE_URL = process.env.FORTYGUARD_BASE_URL || "https://api.fortyguard.com";
+const FORTYGUARD_API_KEY = process.env.FORTYGUARD_API_KEY;
 
 const TERMINAL_SUCCESS = new Set(["succeeded", "completed"]);
 const TERMINAL_FAILURE = new Set(["failed", "error"]);

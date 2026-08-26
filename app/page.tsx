@@ -3,10 +3,22 @@ import { Plus, ShieldCheck } from "lucide-react";
 import { prisma } from "@/lib/db";
 import { FarmCard, type FarmCardData } from "@/components/FarmCard";
 
-/** Farm List (landing screen) — PROJECT_GUIDE.md Section 4, screen 1. Shows
+/**
+ * Farm List (landing screen) — PROJECT_GUIDE.md Section 4, screen 1. Shows
  * the list even with only one farm, so multi-farm support reads as real, not
  * an unverified claim. Server Component reading Postgres directly (no live
- * FortyGuard call — Section 7, rule 1). */
+ * FortyGuard call — Section 7, rule 1).
+ *
+ * `dynamic = "force-dynamic"` is required here, not optional: this route has
+ * no dynamic segment, so Next.js's build otherwise statically prerenders it
+ * once at BUILD TIME and serves that frozen snapshot to every visitor —
+ * confirmed by a real `next build` (showed up as "○ Static" in the route
+ * table), invisible in `next dev`, which doesn't apply the same
+ * optimization. Without this, farms created after a deploy would never
+ * appear on the homepage until the next redeploy.
+ */
+export const dynamic = "force-dynamic";
+
 export default async function FarmListPage() {
   const farms = await prisma.farm.findMany({
     where: { hidden: false },

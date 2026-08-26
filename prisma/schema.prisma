@@ -1,7 +1,10 @@
 // HerdSafe Prisma schema.
-// Connection URL lives in prisma.config.ts (Prisma 7 no longer allows `url` inside
-// the datasource block) — see lib/db.ts for how the client is constructed with a
-// driver adapter at runtime.
+// Connection URL lives in prisma.config.ts (Prisma 7 no longer allows `url` — or
+// `directUrl` — inside the datasource block; both were removed in favor of the
+// config file). prisma.config.ts's URL is CLI-only (migrate/generate/studio) and
+// resolves to Supabase's direct connection in production; the app's own runtime
+// queries always go through the pooled connection — see lib/db.ts for how the
+// client is constructed with a driver adapter there.
 
 generator client {
   provider = "prisma-client-js"
