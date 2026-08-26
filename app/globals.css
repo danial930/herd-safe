@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+:root {
+  --background: #fcfcfb;
+  --surface-raised: #ffffff;
+  --text-primary: #14181a;
+  --text-secondary: #52544f;
+  --text-muted: #82847d;
+  --border-subtle: #e4e2d8;
+
+  /* Brand — a trustworthy deep teal-blue, deliberately distinct from the THI
+   * risk-status colors below so "HerdSafe blue" never gets mistaken for a
+   * risk reading. */
+  --brand: #1f6f8b;
+  --brand-ink: #0f4a5e;
+  --brand-tint: #e6f1f4;
+
+  /* THI risk-severity status scale — fixed, never themed, always paired with
+   * an icon + label (never color alone). */
+  --status-comfort: #0ca30c;
+  --status-mild: #fab219;
+  --status-moderate: #ec835a;
+  --status-severe: #d03b3b;
+  --status-comfort-tint: #e8f7e6;
+  --status-mild-tint: #fef3dc;
+  --status-moderate-tint: #fbe9e1;
+  --status-severe-tint: #fbe2e2;
+
+  /* Categorical — used only for the 3-year backtest comparison chart. */
+  --series-2023: #2a78d6;
+  --series-2024: #eb6834;
+  --series-2025: #1baf7a;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface-raised: var(--surface-raised);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-border-subtle: var(--border-subtle);
+  --color-brand: var(--brand);
+  --color-brand-ink: var(--brand-ink);
+  --color-brand-tint: var(--brand-tint);
+  --color-status-comfort: var(--status-comfort);
+  --color-status-mild: var(--status-mild);
+  --color-status-moderate: var(--status-moderate);
+  --color-status-severe: var(--status-severe);
+  --font-display: var(--font-fraunces);
+  --font-sans: var(--font-plex-sans);
+  --font-mono: var(--font-plex-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--text-primary);
+}
+
+/* A visible focus ring everywhere, since the default outline gets stripped a
+ * lot in Tailwind-heavy UIs and this app has real keyboard-navigable forms. */
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

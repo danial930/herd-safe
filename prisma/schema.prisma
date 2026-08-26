@@ -1,0 +1,140 @@
+// HerdSafe Prisma schema.
+// Connection URL lives in prisma.config.ts (Prisma 7 no longer allows `url` inside
+// the datasource block) — see lib/db.ts for how the client is constructed with a
+// driver adapter at runtime.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum CheckpointType {
+  FARM
+  TRANSPORT_ROUTE
+  STORAGE
+}
+
+model Farm {
+  id          String       @id @default(cuid())
+  name        String
+  status      String       @default("processing") // processing | ready | failed
+  statusStage String? // short human-readable label for the currently running pipeline step
+  statusError String? // populated when status = "failed" — raw message, for logs/debugging
+  statusErrorCategory String? // network | api | application — see lib/fortyguard/errors.ts categorizeError(); drives the friendly message + Retry button
+  isDemoSeed  Boolean      @default(false) // true ONLY for the permanent pre-loaded demo farm — never delete/overwrite
+  hidden      Boolean      @default(false) // soft-delete: excluded from farm list, data untouched — never true for isDemoSeed
+  herdSize    Int? // optional; drives Herd Impact Today totals in the Checkpoint Detail modal (lib/impact/herdMetrics.ts) — per-animal figures shown when absent, never blocks farm creation
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  checkpoints Checkpoint[]
+  chainSummary ChainSummary?
+
+  @@map("farms")
+}
+
+model Checkpoint {
+  id             String         @id @default(cuid())
+  farmId         String
+  farm           Farm           @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  type           CheckpointType
+  name           String
+  latitude       Float
+  longitude      Float
+  polygonGeoJson Json? // farm: AOI polygon for heatmap calls
+  routeWaypoints Json? // transport: ordered [{lat, lon}] waypoints
+  schedule       Json // { start: "HH:MM", end: "HH:MM" } or { departureTime: "HH:MM" }
+  ambientHeatFrequency Json? // FARM/TRANSPORT_ROUTE only — { thresholdC, windowDays, hoursExceeded, longestStreakHours } from lib/ingestion/ambientHeatFrequency.ts; separate from the THI backtest, never null-filled for STORAGE
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  heatmapCache    HeatmapCache[]
+  envParamsCache  EnvParamsCache[]
+  computedRisk    ComputedRisk[]
+  recommendations ScheduleRecommendation[]
+
+  @@map("checkpoints")
+}
+
+model HeatmapCache {
+  id           String     @id @default(cuid())
+  checkpointId String
+  checkpoint   Checkpoint @relation(fields: [checkpointId], references: [id], onDelete: Cascade)
+  analyticType String // tcm | time_of_measure | exceedance | persistence
+  startDate    DateTime
+  endDate      DateTime?
+  filterType   Int
+  granularity  Int
+  threshold    Float?
+  direction    String?
+  rawResponse  Json // full API response, kept for traceability/README example
+  createdAt    DateTime   @default(now())
+
+  @@unique([checkpointId, analyticType, startDate, endDate, filterType, granularity, threshold, direction])
+  @@map("heatmap_cache")
+}
+
+model EnvParamsCache {
+  id                String     @id @default(cuid())
+  checkpointId      String
+  checkpoint        Checkpoint @relation(fields: [checkpointId], references: [id], onDelete: Cascade)
+  date              DateTime
+  temperatureAnchor Float
+  rawResponse       Json // full response; extract relative_humidity_percent hourly array from here
+  createdAt         DateTime   @default(now())
+
+  @@unique([checkpointId, date, temperatureAnchor])
+  @@map("env_params_cache")
+}
+
+model ComputedRisk {
+  id            String     @id @default(cuid())
+  checkpointId  String
+  checkpoint    Checkpoint @relation(fields: [checkpointId], references: [id], onDelete: Cascade)
+  date          DateTime
+  hour          Int
+  temperatureC  Float
+  humidityPct   Float
+  thiValue      Float?
+  thiCategory   String? // comfort | mild | moderate | severe
+  spoilageRisk  Boolean?
+  aqi           Float?
+  workerComfort String? // good | suitable | bad | intolerable
+  createdAt     DateTime   @default(now())
+
+  @@unique([checkpointId, date, hour])
+  @@map("computed_risk")
+}
+
+model ScheduleRecommendation {
+  id                       String     @id @default(cuid())
+  checkpointId             String
+  checkpoint               Checkpoint @relation(fields: [checkpointId], references: [id], onDelete: Cascade)
+  currentScheduleStart     String
+  recommendedOffsetMinutes Int
+  exposureBefore           Float
+  exposureAfter            Float
+  yearlyBacktest           Json // { "2023": {...}, "2024": {...}, "2025": {...} }
+  createdAt                DateTime   @default(now())
+
+  @@map("schedule_recommendations")
+}
+
+model ChainSummary {
+  id                    String   @id @default(cuid())
+  farmId                String   @unique
+  farm                  Farm     @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  computedAt            DateTime @default(now())
+  totalDollarImpact     Float
+  milkYieldLossEstimate Float
+  milkYieldEstimateAvailable Boolean @default(true) // false when the FARM checkpoint has no ScheduleRecommendation yet (reactive-only) — milkYieldLossEstimate is a real 0 only when this is true
+  spoilageRiskEstimate  Float
+  spoilageEstimateAvailable Boolean @default(true) // false when STORAGE has fewer than SPOILAGE_ESTIMATE_MIN_OBSERVED_HOURS cached hours — spoilageRiskEstimate is a real, credible number only when this is true
+  conflictDetected      Boolean
+  conflictDetails       Json?
+
+  @@map("chain_summary")
+}

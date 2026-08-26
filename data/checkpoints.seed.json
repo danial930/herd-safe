@@ -1,0 +1,13 @@
+{
+  "farmName": "Heavenly Dairy",
+  "farm": { "latitude": 30.01050403375586, "longitude": -95.91469892692805 },
+  "storage": { "latitude": 29.739566881150356, "longitude": -95.34750925813294 },
+  "grazingStart": "10:00",
+  "grazingEnd": "16:00",
+  "transportDepartureTime": "13:00",
+  "transportWaypoints": [
+    { "lat": 30.01050403375586, "lon": -95.91469892692805 },
+    { "lat": 29.895795605850818, "lon": -95.59280234688606 },
+    { "lat": 29.739566881150356, "lon": -95.34750925813294 }
+  ]
+}
