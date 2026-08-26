@@ -52,3 +52,4 @@ next-env.d.ts
 
 # generated Prisma client
 /lib/generated/prisma
+PROJECT_GUIDE.md
