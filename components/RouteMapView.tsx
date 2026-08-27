@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import L from "leaflet";
 import { CircleMarker, MapContainer, Polyline, TileLayer, Tooltip, useMap } from "react-leaflet";
 import { MAP_TILE_ATTRIBUTION, MAP_TILE_URL } from "@/lib/constants";
+import { useTileErrorFallback } from "@/lib/hooks/useTileErrorFallback";
 import { fetchRoadRoute } from "@/lib/routing/osrm";
 
 export interface RouteWaypoint {
@@ -66,29 +67,37 @@ export default function RouteMapView({ waypoints, color }: { waypoints: RouteWay
   }, [JSON.stringify(waypoints.map((w) => [w.lat, w.lon]))]);
 
   const linePositions = roadRoute ?? straightLinePositions;
+  const { tilesUnavailable, tileEventHandlers } = useTileErrorFallback();
 
   return (
-    <MapContainer
-      center={center}
-      zoom={9}
-      scrollWheelZoom={false}
-      style={{ height: "220px", width: "100%", borderRadius: "0.75rem" }}
-    >
-      <TileLayer url={MAP_TILE_URL} attribution={MAP_TILE_ATTRIBUTION} />
-      <Polyline positions={linePositions} pathOptions={{ color, weight: 3 }} />
-      {waypoints.map((w) => (
-        <CircleMarker
-          key={`${w.label}-${w.lat}-${w.lon}`}
-          center={[w.lat, w.lon]}
-          radius={7}
-          pathOptions={{ color: "#ffffff", weight: 2, fillColor: color, fillOpacity: 1 }}
-        >
-          <Tooltip permanent direction="top" offset={[0, -6]} className="!text-xs !font-medium">
-            {w.label}
-          </Tooltip>
-        </CircleMarker>
-      ))}
-      <FitToRoute waypoints={waypoints} linePositions={linePositions} />
-    </MapContainer>
+    <div className="relative">
+      <MapContainer
+        center={center}
+        zoom={9}
+        scrollWheelZoom={false}
+        style={{ height: "220px", width: "100%", borderRadius: "0.75rem" }}
+      >
+        <TileLayer url={MAP_TILE_URL} attribution={MAP_TILE_ATTRIBUTION} eventHandlers={tileEventHandlers} />
+        <Polyline positions={linePositions} pathOptions={{ color, weight: 3 }} />
+        {waypoints.map((w) => (
+          <CircleMarker
+            key={`${w.label}-${w.lat}-${w.lon}`}
+            center={[w.lat, w.lon]}
+            radius={7}
+            pathOptions={{ color: "#ffffff", weight: 2, fillColor: color, fillOpacity: 1 }}
+          >
+            <Tooltip permanent direction="top" offset={[0, -6]} className="!text-xs !font-medium">
+              {w.label}
+            </Tooltip>
+          </CircleMarker>
+        ))}
+        <FitToRoute waypoints={waypoints} linePositions={linePositions} />
+      </MapContainer>
+      {tilesUnavailable && (
+        <div className="absolute inset-0 z-[500] flex items-center justify-center rounded-xl bg-background/95 text-sm text-text-muted">
+          Map unavailable — route markers and impact figures below are unaffected.
+        </div>
+      )}
+    </div>
   );
 }

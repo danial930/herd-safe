@@ -514,33 +514,25 @@ export const REFRIGERATION_EXTRA_KWH_PER_DEGREE_C_ABOVE_STRAIN = 3;
 // ---------------------------------------------------------------------------
 
 /**
- * SWITCHED from CartoDB's "Positron" light basemap (2026-08-26): CartoDB's
- * free `basemaps.cartocdn.com` endpoint started returning a watermarked
- * "API KEY REQUIRED" tile on every request — confirmed live, repeatably,
- * not a transient blip. Replaced with the Wikimedia Foundation's public OSM
- * tile service (maps.wikimedia.org) — free, no API key, CORS-enabled
- * (confirmed: `access-control-allow-origin: *`), backed by WMF's own
- * infrastructure (the same tiles power Wikipedia's map features), and
- * explicitly intended for external reuse — unlike OpenStreetMap's own raw
- * tile server (osm.org), whose usage policy discourages direct third-party
- * use (the original reason CartoDB was chosen over it).
- *
- * TRADEOFF: this is OSM's standard bright/colorful cartography, not a light-
- * gray minimal style like Positron — no equivalent free, no-key, reliably-
- * CORS-enabled light basemap was found. `{r}` requests retina tiles
- * (Leaflet substitutes "@2x") on high-DPI screens, matching Wikimedia's own
- * naming convention.
- *
- * One real constraint: Wikimedia's server 403s requests with no Referer
- * header at all (confirmed via curl) — fine for normal browser tile loads
- * (Leaflet loads tiles as plain <img> tags, and browsers send an Origin-only
- * Referer by default under strict-origin-when-cross-origin, which this
- * server accepts), but would fail from a script/curl call with no Referer,
- * or a browser configured to strip it entirely (strict privacy modes).
+ * The standard OpenStreetMap tile server (tile.openstreetmap.org) —
+ * genuinely free, no API key, no signup. Two earlier choices here (CartoDB's
+ * Positron, then Wikimedia's tile service) each turned out to have their own
+ * hidden catch (CartoDB started requiring a paid key; Wikimedia 403s
+ * no-Referer requests) — landing back on OSM's own server directly, which
+ * has none of that, just a usage-policy expectation of reasonable traffic.
+ * That's an explicit, deliberate call for this app's actual usage pattern
+ * (light, intermittent — a handful of map views during hackathon judging,
+ * not a production app with real user volume) — see MAP_TILE_FALLBACK_MS
+ * below and the tileerror handling in LocationPickerMap.tsx/RouteMapView.tsx
+ * for what happens if the server is ever unavailable, and don't add
+ * anything that polls/auto-refreshes tiles.
  */
-export const MAP_TILE_URL = "https://maps.wikimedia.org/osm-intl/{z}/{x}/{y}{r}.png";
-export const MAP_TILE_ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+export const MAP_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+export const MAP_TILE_ATTRIBUTION = "&copy; OpenStreetMap contributors";
+
+/** Consecutive tile-load failures before a map shows a plain "map
+ * unavailable" fallback instead of a broken/blank tile grid. */
+export const MAP_TILE_ERROR_THRESHOLD = 3;
 
 export const MAP_DEFAULT_ZOOM = 12;
 

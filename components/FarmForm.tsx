@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, MapPin, Milk, Truck, Warehouse } from "lucide-react";
 import { LocationPicker } from "./LocationPicker";
@@ -54,6 +54,14 @@ export function FarmForm({ mode, farmId, initialValues }: FarmFormProps) {
   const [values, setValues] = useState<FarmFormDraft>(initialValues ?? DEFAULTS);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A plain boolean ref, checked synchronously at the very top of
+  // handleSubmit — `submitting` state alone isn't enough to rule out a
+  // double-submit: React batches/re-renders asynchronously, so a fast
+  // double-click can fire handleSubmit twice before the disabled button
+  // attribute actually takes effect in the DOM. Each submit creates a real
+  // farm with real billed ingestion (lib/ingestion/runFarmPipeline.ts) —
+  // this makes that race structurally impossible rather than just unlikely.
+  const submitInFlightRef = useRef(false);
 
   function set<K extends keyof FarmFormDraft>(key: K, value: FarmFormDraft[K]) {
     setValues((v) => ({ ...v, [key]: value }));
@@ -65,6 +73,8 @@ export function FarmForm({ mode, farmId, initialValues }: FarmFormProps) {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (submitInFlightRef.current) return;
+
     setError(null);
 
     // Belt-and-suspenders alongside the disabled submit button below and
@@ -83,6 +93,7 @@ export function FarmForm({ mode, farmId, initialValues }: FarmFormProps) {
       return;
     }
 
+    submitInFlightRef.current = true;
     setSubmitting(true);
     const payload: FarmFormInput = { ...values, farmLatitude, farmLongitude, storageLatitude, storageLongitude };
 
@@ -102,6 +113,7 @@ export function FarmForm({ mode, farmId, initialValues }: FarmFormProps) {
       router.push(`/farms/${farm.id}/processing`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong — try again.");
+      submitInFlightRef.current = false;
       setSubmitting(false);
     }
   }

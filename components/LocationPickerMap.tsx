@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import L, { type LeafletMouseEvent, type Map as LeafletMap, type Marker as LeafletMarker } from "leaflet";
 import { MapContainer, Marker, TileLayer, useMapEvents } from "react-leaflet";
 import { CONTINENTAL_US_BOUNDS, MAP_DEFAULT_ZOOM, MAP_TILE_ATTRIBUTION, MAP_TILE_URL } from "@/lib/constants";
+import { useTileErrorFallback } from "@/lib/hooks/useTileErrorFallback";
 
 /** Wide continental-US view shown until a location is actually chosen — no
  * marker is rendered in this state (see below), so this is just an
@@ -51,6 +52,7 @@ export interface LocationPickerMapProps {
  * from LocationPicker.tsx, since Leaflet touches `window` at import time. */
 export default function LocationPickerMap({ latitude, longitude, onChange, recenterTo, mapRef }: LocationPickerMapProps) {
   const hasLocation = latitude !== null && longitude !== null;
+  const { tilesUnavailable, tileEventHandlers } = useTileErrorFallback();
 
   useEffect(() => {
     if (recenterTo && mapRef.current) {
@@ -60,28 +62,35 @@ export default function LocationPickerMap({ latitude, longitude, onChange, recen
   }, [recenterTo]);
 
   return (
-    <MapContainer
-      center={hasLocation ? [latitude, longitude] : EMPTY_STATE_CENTER}
-      zoom={hasLocation ? MAP_DEFAULT_ZOOM : EMPTY_STATE_ZOOM}
-      style={{ height: "280px", width: "100%", borderRadius: "0.75rem" }}
-      ref={mapRef}
-    >
-      <TileLayer url={MAP_TILE_URL} attribution={MAP_TILE_ATTRIBUTION} />
-      <ClickHandler onPick={onChange} />
-      {hasLocation && (
-        <Marker
-          position={[latitude, longitude]}
-          icon={pinIcon}
-          draggable
-          eventHandlers={{
-            dragend: (e) => {
-              const marker = e.target as LeafletMarker;
-              const pos = marker.getLatLng();
-              onChange(pos.lat, pos.lng);
-            },
-          }}
-        />
+    <div className="relative">
+      <MapContainer
+        center={hasLocation ? [latitude, longitude] : EMPTY_STATE_CENTER}
+        zoom={hasLocation ? MAP_DEFAULT_ZOOM : EMPTY_STATE_ZOOM}
+        style={{ height: "280px", width: "100%", borderRadius: "0.75rem" }}
+        ref={mapRef}
+      >
+        <TileLayer url={MAP_TILE_URL} attribution={MAP_TILE_ATTRIBUTION} eventHandlers={tileEventHandlers} />
+        <ClickHandler onPick={onChange} />
+        {hasLocation && (
+          <Marker
+            position={[latitude, longitude]}
+            icon={pinIcon}
+            draggable
+            eventHandlers={{
+              dragend: (e) => {
+                const marker = e.target as LeafletMarker;
+                const pos = marker.getLatLng();
+                onChange(pos.lat, pos.lng);
+              },
+            }}
+          />
+        )}
+      </MapContainer>
+      {tilesUnavailable && (
+        <div className="absolute inset-0 z-[500] flex items-center justify-center rounded-xl bg-background/95 text-sm text-text-muted">
+          Map unavailable — you can still enter coordinates directly below.
+        </div>
       )}
-    </MapContainer>
+    </div>
   );
 }

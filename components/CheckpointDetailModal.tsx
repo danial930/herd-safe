@@ -5,7 +5,6 @@ import Link from "next/link";
 import { Clock, Droplet, Loader2, Milk, Sun, Wheat, Wind, X, Zap } from "lucide-react";
 import {
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ReferenceLine,
@@ -19,6 +18,7 @@ import { SpoilageBadge } from "./SpoilageBadge";
 import { HerdImpactCard } from "./HerdImpactCard";
 import { CATEGORY_COLOR } from "./RiskGauge";
 import { RouteMap } from "./RouteMap";
+import { ThiRiskSection } from "./ThiRiskSection";
 import type { RouteWaypoint } from "./RouteMapView";
 import type { CheckpointSummary } from "@/lib/farms/getCheckpointSummaries";
 import {
@@ -82,12 +82,6 @@ interface RecommendationResponse {
     yearlyBacktest: Record<string, { exposureBefore: number; exposureAfter: number }>;
   } | null;
 }
-
-const YEAR_COLORS: Record<string, string> = {
-  "2023": "var(--series-2023)",
-  "2024": "var(--series-2024)",
-  "2025": "var(--series-2025)",
-};
 
 function groupByYearAndHour(series: RiskSeriesPoint[]) {
   const byYearHour = new Map<string, { sum: number; count: number }>();
@@ -285,109 +279,18 @@ export function CheckpointDetailModal({ checkpoint, onClose }: { checkpoint: Che
                   </p>
                 )}
               </>
-            ) : hasForecastOnly ? (
-              <div>
-                <h3 className="mb-2 text-sm font-semibold text-text-primary">
-                  {forecastThiData.length === 1 ? "Current conditions" : `Next ${forecastThiData.length} hours`}
-                </h3>
-                <div className="h-56 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={forecastThiData} margin={{ top: 8, right: 12, left: -12, bottom: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" />
-                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--text-muted)" }} axisLine={{ stroke: "var(--border-subtle)" }} tickLine={false} />
-                      <YAxis tick={{ fontSize: 11, fill: "var(--text-muted)" }} axisLine={false} tickLine={false} width={32} />
-                      <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid var(--border-subtle)" }} />
-                      <ReferenceLine y={72} stroke="var(--status-mild)" strokeDasharray="4 4" label={{ value: "mild threshold", fontSize: 10, fill: "var(--status-mild)", position: "insideTopRight" }} />
-                      <Line type="monotone" dataKey="thi" stroke="var(--brand)" strokeWidth={2} dot={{ r: 3 }} name="THI" connectNulls />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-                <p className="mt-2 text-xs text-text-muted">
-                  Forecast, not a historical backtest — a multi-year pull hasn&apos;t been run for this checkpoint yet.
-                </p>
-              </div>
-            ) : hasHistorical ? (
-              <>
-                <div>
-                  <h3 className="mb-2 text-sm font-semibold text-text-primary">
-                    THI over the day — {chartData.years.length}-year comparison
-                  </h3>
-                  <div className="h-56 w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={chartData.rows} margin={{ top: 8, right: 12, left: -12, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" />
-                        <XAxis dataKey="hour" tick={{ fontSize: 11, fill: "var(--text-muted)" }} axisLine={{ stroke: "var(--border-subtle)" }} tickLine={false} unit="h" />
-                        <YAxis tick={{ fontSize: 11, fill: "var(--text-muted)" }} axisLine={false} tickLine={false} width={32} />
-                        <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid var(--border-subtle)" }} />
-                        <Legend wrapperStyle={{ fontSize: 12 }} />
-                        <ReferenceLine y={72} stroke="var(--status-mild)" strokeDasharray="4 4" label={{ value: "mild threshold", fontSize: 10, fill: "var(--status-mild)", position: "insideTopRight" }} />
-                        {chartData.years.map((year) => (
-                          <Line key={year} type="monotone" dataKey={year} stroke={YEAR_COLORS[year] ?? "var(--brand)"} strokeWidth={2} dot={false} connectNulls />
-                        ))}
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-                {recommendation && (
-                  <div className="rounded-xl border border-border-subtle p-4">
-                    <h3 className="mb-2 text-sm font-semibold text-text-primary">Recommended schedule shift</h3>
-                    <p className="text-sm text-text-secondary">
-                      Shift from <span className="font-mono text-text-primary">{recommendation.currentScheduleStart}</span> by{" "}
-                      <span className="font-medium text-text-primary">{recommendation.recommendedOffsetMinutes} min</span> — exposure drops from{" "}
-                      <span className="font-medium text-text-primary">{recommendation.exposureBefore}h</span> to{" "}
-                      <span className="font-medium text-text-primary">{recommendation.exposureAfter}h</span> per week.
-                    </p>
-                    <table className="mt-3 w-full text-xs">
-                      <thead>
-                        <tr className="text-left text-text-muted">
-                          <th className="pb-1 font-medium">Year</th>
-                          <th className="pb-1 font-medium">Before</th>
-                          <th className="pb-1 font-medium">After</th>
-                          <th className="pb-1 font-medium">Holds?</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {Object.entries(recommendation.yearlyBacktest).map(([year, entry]) => (
-                          <tr key={year} className="border-t border-border-subtle">
-                            <td className="py-1 font-mono">{year}</td>
-                            <td className="py-1 font-mono">{entry.exposureBefore}h</td>
-                            <td className="py-1 font-mono">{entry.exposureAfter}h</td>
-                            <td className="py-1">{entry.exposureAfter < entry.exposureBefore ? "✓" : "—"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-
-                <p className="text-xs text-text-muted">
-                  The comparison above is a historical-analog estimate averaged from real cached data across{" "}
-                  {risk.yearsBacktested.join(", ")} — not a live forecast, since our reactive pull only reaches{" "}
-                  {REACTIVE_FORECAST_HOURS} hour{REACTIVE_FORECAST_HOURS === 1 ? "" : "s"} out.
-                </p>
-              </>
             ) : (
-              <div className="rounded-xl border border-dashed border-border-subtle p-4 text-sm text-text-secondary">
-                No data yet for this checkpoint — its ingestion may have failed or hasn&apos;t run yet.
-              </div>
-            )}
-
-            {checkpoint.type !== "STORAGE" && risk.ambientHeatFrequency && (
-              <div className="rounded-xl border border-border-subtle p-4">
-                <h3 className="mb-1 text-sm font-semibold text-text-primary">
-                  Ambient heat frequency — past {risk.ambientHeatFrequency.windowDays} days
-                </h3>
-                <p className="text-sm text-text-secondary">
-                  Longest continuous stretch above{" "}
-                  <span className="font-medium text-text-primary">{risk.ambientHeatFrequency.thresholdC}°C</span>:{" "}
-                  <span className="font-medium text-text-primary">{risk.ambientHeatFrequency.longestStreakHours} hours</span>.
-                </p>
-                <p className="mt-1 text-xs text-text-muted">
-                  Raw ambient-temperature frequency from real historical data — not the THI-based stress metric above, and not
-                  included in the dollar-impact estimate.
-                </p>
-              </div>
+              <ThiRiskSection
+                hasHistorical={hasHistorical}
+                hasForecastOnly={hasForecastOnly}
+                latestRisk={latestRisk}
+                chartData={chartData}
+                forecastThiData={forecastThiData}
+                recommendation={recommendation}
+                yearsBacktested={risk.yearsBacktested}
+                ambientHeatFrequency={risk.ambientHeatFrequency}
+                reactiveForecastHours={REACTIVE_FORECAST_HOURS}
+              />
             )}
 
             {herdImpact && (
@@ -404,7 +307,7 @@ export function CheckpointDetailModal({ checkpoint, onClose }: { checkpoint: Che
                       for a total estimate.
                     </p>
                   )}
-                  <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
+                  <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
                     <HerdImpactCard
                       icon={Droplet}
                       value={
@@ -460,7 +363,7 @@ export function CheckpointDetailModal({ checkpoint, onClose }: { checkpoint: Che
                       <RouteMap waypoints={routeWaypoints} color={routeColor} />
                     </div>
                   )}
-                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                  <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
                     <HerdImpactCard
                       icon={Milk}
                       value={
@@ -489,7 +392,7 @@ export function CheckpointDetailModal({ checkpoint, onClose }: { checkpoint: Che
                 <hr className="border-border-subtle" />
                 <div className="rounded-2xl bg-background p-4">
                   <h3 className="mb-3 text-sm font-semibold text-text-primary">Storage Impact</h3>
-                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                  <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
                     <HerdImpactCard
                       icon={Zap}
                       value={`$${storageImpact.additionalCoolingCostUsd.toFixed(2)}`}

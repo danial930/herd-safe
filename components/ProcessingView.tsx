@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Loader2, RotateCw, TriangleAlert } from "lucide-react";
@@ -24,6 +24,11 @@ export function ProcessingView({ farmId }: { farmId: string }) {
   const router = useRouter();
   const [status, setStatus] = useState<FarmStatus | null>(null);
   const [retrying, setRetrying] = useState(false);
+  // Same synchronous-guard reasoning as FarmForm.tsx's submitInFlightRef —
+  // `retrying` state alone can't rule out a fast double-click firing
+  // handleRetry twice before React re-renders the disabled button, and each
+  // call re-runs real, billed ingestion.
+  const retryInFlightRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -54,12 +59,15 @@ export function ProcessingView({ farmId }: { farmId: string }) {
   }, [farmId, router]);
 
   async function handleRetry() {
+    if (retryInFlightRef.current) return;
+    retryInFlightRef.current = true;
     setRetrying(true);
     try {
       const res = await fetch(`/api/farms/${farmId}/retry`, { method: "POST" });
       if (!res.ok) throw new Error("Retry failed to start");
       setStatus({ status: "processing", statusStage: null, statusError: null, statusErrorCategory: null });
     } catch {
+      retryInFlightRef.current = false;
       setRetrying(false);
     }
   }
