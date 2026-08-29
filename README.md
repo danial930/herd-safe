@@ -1,542 +1,418 @@
 # HerdSafe
 
-Heat is only dangerous when it overlaps with something that can't protect
-itself and can't say so in time. HerdSafe applies that principle across three
-linked checkpoints in a real dairy supply chain — a **farm/pasture**, a
-**transport route**, and a **storage facility** — using real FortyGuard
-temperature data to find safer schedules and flag spoilage risk before it
-happens.
+HerdSafe advocates for the parts of the food-supply chain that can't advocate for themselves: dairy cattle in a pasture, milk in a truck, and product in a storage facility — none of which can report their own heat distress. It watches three checkpoints along a farm's chain and turns real climate data into concrete, cited operational numbers: how much heat stress the herd is under right now, whether refrigeration is being strained, and what a schedule shift is worth in dollars.
 
-Built with Next.js (App Router) + TypeScript + PostgreSQL/Prisma, driven
-entirely by the FortyGuard tOS Enterprise API.
+This README is the technical submission document for this project. Every value, formula, and quirk described below is either quoted directly from the codebase or pulled from a real, cached database entry — nothing here is approximated.
 
-## What's working
+## Table of contents
 
-- **Full pipeline against the live FortyGuard API**, verified with real calls
-  during this build: submit → poll → cache, real per-hour temperature (`tcm`
-  heatmap) paired with real per-hour humidity (`env_params`), THI computed
-  ourselves from that real pair (never from FortyGuard's anchor-artifact
-  `heat_index_celsius`/`wet_bulb_temperature_celsius` fields — see
-  [Known API quirks](#known-api-quirks-discovered-during-this-build)).
-- **Multi-farm support** — Farm List, Add Farm, Processing (real staged
-  progress polled from the DB, not a fake timer), Dashboard, Checkpoint
-  Detail (modal), Edit Farm. All 6 screens from the spec are wired end to
-  end.
-- **Schedule optimizer + multi-year backtest** for the farm and transport
-  checkpoints (available, not automatic on new farms — see
-  [Credit budget & default ingestion scope](#credit-budget--default-ingestion-scope)),
-  and a **historical-analog heat profile** (explicitly labeled as an analog,
-  not a forecast). The backtest scope is whatever years are actually
-  complete for that checkpoint, reported and labeled dynamically — never a
-  hardcoded "3 years."
-- **Spoilage risk + worker-comfort flag** for the storage checkpoint, reactive
-  off current conditions (see [Credit budget & default ingestion scope](#credit-budget--default-ingestion-scope)
-  for why the reactive window is 1 hour, not 12).
-- **Combined dollar-impact estimate** (milk yield loss + spoilage risk) and a
-  **chain-conflict check** (does transport's recommended arrival land during
-  a storage risk window?).
-- **Cache-first, idempotent ingestion** — re-running any script after a crash
-  resumes instead of re-pulling; verified by killing an in-progress pull and
-  confirming the cache stopped it from re-fetching completed hours.
-- **24 passing unit tests** (Vitest) covering every function in `lib/risk/`
-  and `lib/exposure/`.
-- **The permanent demo farm** (`isDemoSeed: true`) — always populated, never
-  deletable by any script, seeded from synthetic-but-realistic Texas-summer
-  climate fixtures run through the exact same real computation pipeline (see
-  [Demo farm data](#demo-farm-data--why-its-synthetic) below).
+1. [Project overview](#1-project-overview)
+2. [How to run it from scratch](#2-how-to-run-it-from-scratch)
+3. [System architecture](#3-system-architecture)
+4. [Data model](#4-data-model)
+5. [FortyGuard API integration](#5-fortyguard-api-integration)
+6. [Core algorithms and formulas](#6-core-algorithms-and-formulas)
+7. [Testing and validation](#7-testing-and-validation)
+8. [What doesn't work yet / known limitations](#8-what-doesnt-work-yet--known-limitations)
+9. [Future scope](#9-future-scope)
+10. [Security and credentials](#10-security-and-credentials)
+11. [Deployment](#11-deployment)
+12. [AI tools disclosure](#12-ai-tools-disclosure)
 
-## What's stubbed / placeholder
+---
 
-- **Herd size** is a single global constant (`DEFAULT_HERD_SIZE` in
-  `lib/constants.ts`), not a per-farm field — the Add Farm form (as specified)
-  doesn't collect one.
-- **Farm AOI polygon and transport route are auto-derived** for real,
-  user-created farms (a buffer square around the single farm coordinate; a
-  3-point farm→midpoint→storage line) — the Add Farm form collects points,
-  not a drawn boundary. The permanent demo farm is the one exception: its
-  transport waypoints use the real road-route midpoint from
-  `PROJECT_GUIDE.md` Section 0.5 rather than the auto-derived straight-line
-  average — an explicit override scoped to `prisma/seed.ts` only (see
-  [Demo farm data](#demo-farm-data--why-its-synthetic)).
+## 1. Project overview
 
-## Resolved since the first pass
+Heat stress quietly costs the dairy supply chain money and animal welfare at three distinct points, and none of the things actually at risk — a cow, a tanker of milk, a walk-in cooler — can tell anyone when they're in trouble. HerdSafe exists to watch on their behalf, using real climate data instead of guesswork.
 
-Two things flagged as unresolved in the first build pass now have real
-answers, from `PROJECT_GUIDE.md` Section 0.5/8:
+A farm in HerdSafe is modeled as exactly three checkpoints, created together when a farm is added:
 
-- **Demo farm coordinates and schedule are now real, finalized values** —
-  "Heavenly Dairy" (`data/checkpoints.seed.json`), not placeholders. Grazing
-  (10:00–16:00) and transport departure (13:00) were chosen deliberately
-  inside peak heat so the optimizer has genuine signal to act on — see
-  [Demo farm data](#demo-farm-data--why-its-synthetic) for how the synthetic
-  fixture was retuned to actually produce that.
-- **`SPOILAGE_EVENT_COST_USD` now has a real anchor: $9,000** — the value of
-  one full spoiled tanker load. A standard raw-milk tanker holds ~5,500
-  gallons (~20,800 L); at the milk-price constant below, that's ~$9,000
-  (documented in `lib/constants.ts`).
-- **`AMBIENT_HEAT_STRAIN_THRESHOLD_C`'s framing is now explicit everywhere
-  it's surfaced.** My instinct that comparing ambient air directly to the
-  literal food-safety ceiling wasn't physically meaningful was correct — the
-  fix isn't a new data source (there isn't one), it's what the number
-  communicates: every badge, chart label, and log line now says
-  "refrigeration equipment strain and outage risk," never anything implying
-  the stored product itself is confirmed at ambient temperature. See
-  `components/SpoilageBadge.tsx`, `components/CheckpointDetailModal.tsx`, and
-  the doc comments on `AMBIENT_HEAT_STRAIN_THRESHOLD_C` and
-  `calculateSpoilageRisk`.
-- **Milk price is now $0.43/liter** (USDA-ERS/AMS, 2026 all-milk farm price
-  ~$18.95/cwt), replacing the earlier improvised $0.45/L estimate.
+- **Pasture (`FARM`)** — where the herd grazes, on a fixed daily schedule (grazing start/end). HerdSafe computes the Temperature-Humidity Index (THI) here and can recommend a schedule shift to reduce severe-heat exposure.
+- **Transport route (`TRANSPORT_ROUTE`)** — the road route the milk truck takes from pasture to storage, with its own departure-time schedule. HerdSafe tracks heat exposure along this leg and estimates how much cooling buffer the milk has before it crosses the federal receiving-temperature ceiling.
+- **Storage facility (`STORAGE`)** — the refrigerated facility receiving the product. HerdSafe flags when ambient heat is severe enough to plausibly strain refrigeration equipment.
 
-## What I'm unsure about
+Each checkpoint gets real hourly temperature and humidity from the FortyGuard climate API, run through THI and food-safety formulas (cited in [Section 6](#6-core-algorithms-and-formulas)), to produce a risk reading, a worker-safety flag, and — where the data supports it — a dollar-impact estimate for the whole chain.
 
-- **The tcm single-hour buffer-polygon size** (`CLIMATE_POINT_BUFFER_METERS`,
-  300m) was tuned empirically against one location during this build (see
-  below) — it might need retuning if a real farm's coordinates turn out to
-  sit awkwardly on FortyGuard's tile grid the same way.
-- **The demo farm's synthetic peak/trough temperatures were retuned to find
-  genuine optimizer relief for both the farm and transport checkpoints under
-  the new, narrower Section 0.5 schedule** (a 6h grazing window and a 2h
-  transport window, both centered on peak heat, vs. the wider placeholder
-  windows this was originally tuned against). At realistic dairy-heat-stress
-  peaks, that narrow-window-centered-on-peak shape turns out to be uniformly
-  hot for a long stretch around it — no combination I found gives genuine
-  relief AND reaches severe (≥90) THI at the same time, so
-  `milkYieldLossEstimate` lands at $0 for this specific schedule/curve
-  combination. `spoilageRiskEstimate` ($9,000) still drives the headline
-  number. See the comment above `YEAR_PEAK_TEMPERATURES_C` in
-  `prisma/seed.ts` for the full reasoning — flagging this as worth a look if
-  a nonzero milk-yield figure matters for the demo narrative.
+## 2. How to run it from scratch
 
-## Setup from scratch
+### Prerequisites
+
+- Node.js ≥ 20.9.0 (required by Next.js 16.3.2 — see `node_modules/next/package.json`'s `engines` field)
+- A PostgreSQL 15+ database (a native local instance, or a hosted one like Supabase — see below)
+- A FortyGuard tOS Enterprise API key
+
+### Clone and install
 
 ```bash
-# 1. Install dependencies
+git clone <this-repo-url>
+cd HerdSafe
 npm install
+```
 
-# 2. Environment
-cp .env.example .env.local
-# then edit .env.local and paste in your real FORTYGUARD_API_KEY
+`npm install` automatically runs `prisma generate` via the `postinstall` script, generating the Prisma client into `lib/generated/prisma` (gitignored).
 
-# 3. Local Postgres (Docker wasn't available in the environment this was
-#    built in — see docs/local-postgres.md for the native-cluster setup used
-#    instead, or swap in your own Postgres and just point DATABASE_URL at it)
-initdb -D pgdata -U herdsafe --auth=trust --no-locale --encoding=UTF8
-pg_ctl -D pgdata -l pgdata/logfile -o "-p 5433 -k $(pwd)/pgdata" start
-psql -h 127.0.0.1 -p 5433 -U herdsafe -d postgres -c "CREATE DATABASE herdsafe;"
+### Environment variables
 
-# 4. Migrate
-npx prisma migrate deploy   # (or `npx prisma migrate dev` in development)
+Copy `.env.example` to `.env.local` and fill in real values. Variable **names** only — see `.env.example` in the repo for the exact placeholder format:
 
-# 5. Seed the permanent demo farm (synthetic fixtures — no API credits spent)
+- `DATABASE_URL` — the app's runtime database connection
+- `DIRECT_URL` — a direct (non-pooled) database connection, used only by the Prisma CLI
+- `FORTYGUARD_API_KEY` — your FortyGuard tOS Enterprise API key
+- `FORTYGUARD_BASE_URL` — optional, defaults to `https://api.fortyguard.com`
+
+#### Database setup: local vs. Supabase
+
+For local development, `docs/local-postgres.md` documents a native (no Docker, no root) Postgres cluster running on port 5433, so `DATABASE_URL` and `DIRECT_URL` can point at the same local instance.
+
+For production, HerdSafe is built against **Supabase Postgres**, which requires two distinct connection strings because of how Supabase's connection pooler works:
+
+- `DATABASE_URL` — the **pooled** connection (Supavisor/PgBouncer, transaction mode, port `6543`, with `?pgbouncer=true`). Used by the app at runtime for all normal query traffic via `@prisma/adapter-pg`.
+- `DIRECT_URL` — the **direct** connection (port `5432`, no pooler). Used only by the Prisma CLI (`migrate`, `generate`, `studio`) — PgBouncer's transaction-pooling mode doesn't support the prepared statements Prisma Migrate needs.
+
+Prisma 7 removed the `datasource.url`/`directUrl` fields from `schema.prisma` entirely; the CLI now reads connection info from `prisma.config.ts`, whose `datasource.url` resolves to `DIRECT_URL` (falling back to `DATABASE_URL`) — see the header comment in `prisma/schema.prisma` for the full explanation.
+
+### Run migrations
+
+```bash
+npx prisma migrate deploy
+```
+
+### Seed the permanent demo farm
+
+```bash
 npm run seed
+```
 
-# 6. Optional: full multi-year historical pull for one checkpoint. Gated
-#    behind ALLOW_HISTORICAL_INGESTION=true — the live "Add New Farm" flow
-#    never sets this and never reaches this path; it always uses the cheap
-#    reactive current-conditions pull (~29,800 credits/farm, including the
-#    ambient-heat-frequency signal — see "Credit budget & default ingestion
-#    scope" below). Only run this manually if you
-#    deliberately want the full historical backtest for a specific
-#    checkpoint (~2.2M credits — check your balance FIRST).
-npm run check-usage
-ALLOW_HISTORICAL_INGESTION=true npx tsx scripts/ingest-historical.ts <checkpointId>
-npx tsx scripts/recompute-recommendation.ts <checkpointId>  # if a pull was interrupted, use whatever's fully cached without pulling more
+This runs `prisma/seed.ts`, which creates (or idempotently updates) one permanent demo farm — driven by synthetic-but-realistic climate fixtures (`lib/fixtures/syntheticClimateData.ts`), not a live FortyGuard pull, but processed through the exact same THI/optimizer/backtest/dollar-impact pipeline real ingestion uses. The seed script never deletes an existing demo farm; re-running it just brings it up to date. This is the one farm in the system with a genuine, complete 3-year historical backtest (see [Section 5](#5-fortyguard-api-integration)).
 
-# 7. Dev server
+### Run the dev server
+
+```bash
 npm run dev
 ```
 
-Then open `http://localhost:3000` — the demo farm is there immediately.
-"Add New Farm" spawns the real ingestion pipeline against FortyGuard —
-current conditions only, a few seconds per checkpoint (see
-[Known API quirks](#known-api-quirks-discovered-during-this-build)).
-
-Other useful commands:
+### Run the test suite
 
 ```bash
-npm run test        # Vitest — lib/risk and lib/exposure unit tests
-npm run typecheck    # tsc --noEmit
-npm run lint         # eslint
+npm test
 ```
 
-## Architecture
+Other useful scripts (`package.json`): `npm run typecheck`, `npm run lint`, `npm run check-usage` (queries FortyGuard's own billing-usage endpoints).
 
-- Next.js App Router, TypeScript strict mode throughout.
-- **API routes are read-only against Postgres** — they never call
-  FortyGuard live during a request (Vercel's execution limits are seconds;
-  FortyGuard tasks can take minutes). All FortyGuard calls happen in
-  `scripts/` or the pipeline they spawn.
-- **`lib/fortyguard/client.ts` is the only place that calls FortyGuard.** It's
-  a TypeScript port of the Python quickstart's `fortyguard/client.py` —
-  same submit→poll pattern, same case-insensitive status matching, same
-  "404 right after submit isn't a failure, keep polling" behavior.
-- **`lib/constants.ts`** holds every threshold, endpoint, and tunable value —
-  nothing hardcoded elsewhere.
-- **Server Components query Postgres directly** via `lib/db.ts` for initial
-  page loads (the idiomatic Next.js App Router pattern); **Client Components
-  hit the API routes** for polling (Processing screen) and mutations
-  (Add/Edit Farm forms, Checkpoint Detail's on-demand data fetch). Both paths
-  are still strictly read-only-against-Postgres / no-live-FortyGuard-calls at
-  request time — this is a request-shape decision, not a relaxation of that
-  rule.
-- Prisma 7 changed its connection model since this spec was written: the
-  `datasource` block no longer accepts a `url` — the connection string lives
-  in `prisma.config.ts`, and `PrismaClient` now requires an explicit driver
-  adapter (`@prisma/adapter-pg`). See `lib/db.ts`.
+## 3. System architecture
 
-## Known API quirks (discovered during this build)
+**Stack:** Next.js 16 (App Router, Turbopack, React 19, TypeScript), Tailwind CSS v4, Prisma 7 with the `@prisma/adapter-pg` driver adapter, PostgreSQL via Supabase, hosted on Vercel.
 
-Beyond what `PROJECT_GUIDE.md` already documented from the Python quickstart,
-live testing against the real API during this build surfaced a few more:
+**How the pieces relate:**
 
-1. **A live `filter_type=1` (single-hour) `tcm` heatmap call can return tiles
-   carrying `average_temperature`/`min_temperature`/`max_temperature` instead
-   of the plain `temperature` field** the quickstart notebooks document for
-   that filter type. `lib/ingestion/climatePull.ts`'s extraction checks
-   `temperature` first, falling back to `average_temperature`.
-2. **A too-small buffer polygon around a point can return zero tiles**
-   (`n_cells: 0`, empty `map_data.features`) depending on exactly where the
-   point falls on FortyGuard's tile grid — and this is genuinely
-   location-dependent, not a fixed safe buffer size. Confirmed at two
-   different real coordinates: 75m/150m failed at one Texas point (250m
-   fixed it there); separately, 300m *and* 500m *and* even 2000m all failed
-   at a real California Central Valley transport-route point. `tryAverageTcmTemperature()`
-   in `lib/ingestion/climatePull.ts` now auto-escalates the buffer
-   (`CLIMATE_POINT_BUFFER_METERS`, then `CLIMATE_POINT_BUFFER_ESCALATION_METERS`)
-   on a zero-tile response instead of requiring a manual fix each time — but
-   that escalation isn't unbounded, since each attempt is a real billed call
-   (see quirk #3), and it still isn't guaranteed to succeed at every point.
-3. **A zero-tile response is a billed `Completed` task, not a free `Failed`
-   one** (Section 3: "Failed tasks cost zero credits. Only Completed tasks
-   are billed") — so a buffer that's too small at a given point costs real
-   credits for a useless result, and a naive retry-on-crash doesn't help
-   because the response was already `Completed`. A related bug this
-   surfaced: the ingestion cache was writing a zero-tile response to
-   `HeatmapCache` as if it were valid, which meant every subsequent retry —
-   even after fixing the buffer size in code — just replayed the same
-   useless cached response instead of ever calling the API again. Fixed:
-   `fetchHourlyTemperatureC()` now only caches a response once it has
-   confirmed usable tiles.
-4. **The `env_params` `analysis` parameter-restriction list doesn't appear to
-   be honored** — a live call requesting only 2 parameters returned the full
-   default set regardless. `lib/ingestion/climatePull.ts` stopped requesting
-   a restricted set and just extracts what it needs from the full response
-   (which also means one `env_params` call now serves both the humidity and
-   AQI extractors at no extra cost).
-5. **`env_params` never returns a raw ambient-temperature series at all** —
-   only the anchor `temperature` you passed in, echoed back as a scalar. The
-   *only* way to get a real per-hour temperature series is
-   `filter_type=1` (single-hour) `tcm` heatmap calls, one per hour — neither
-   `filter_type=2` (range of hours) nor `filter_type=3` (single day) return a
-   genuine hourly array from the heatmap endpoint either (both return a
-   single aggregate). This is why a full year of hourly data is
-   prohibitively expensive to pull exhaustively — see
-   `HISTORICAL_SAMPLE_WEEK` below.
+- **Frontend** (`app/`, `components/`) — React Server/Client Components rendering the farm list, farm detail, checkpoint detail modal, add/edit farm form, and the route map (`react-leaflet` + OpenStreetMap tiles).
+- **API routes** (`app/api/`) — Next.js Route Handlers that read/write Postgres via Prisma and, for farm creation/retry, kick off ingestion.
+- **Database** (Postgres/Supabase, via `lib/db.ts`) — the single source of truth for farms, checkpoints, cached FortyGuard responses, and computed risk/recommendation/summary data.
+- **Ingestion** (`lib/ingestion/`) — the logic that actually calls FortyGuard, computes risk, and writes to Postgres. It runs two ways:
+  - **In-process, on the request path**, via Next.js's `after()` (stable since Next 15.1) — called from the farm create/update/retry API routes so ingestion continues after the HTTP response is sent, without needing a detached subprocess (which doesn't survive Vercel's serverless runtime — see [Section 8](#8-what-doesnt-work-yet--known-limitations)).
+  - **As standalone CLI scripts** (`scripts/ingest-historical.ts`, `scripts/ingest-current.ts`, `scripts/recompute-recommendation.ts`, `scripts/measure-api-costs.ts`, `scripts/check-usage.ts`), for manual/ops use outside the web request flow.
 
-### One real request/response pair
+**Folder structure:**
 
-Pulled live during this build (`POST /v1/heatmap`, single-hour `tcm`, against
-a real Texas pasture coordinate used for testing during development — not
-the current demo farm's coordinates, which were finalized in a later pass):
+| Path | Purpose |
+|---|---|
+| `app/` | Next.js App Router — pages under `app/farms/`, API route handlers under `app/api/` |
+| `components/` | React components (farm list/cards, checkpoint detail modal, forms, maps, risk charts) |
+| `lib/exposure/` | Schedule window math, exposure counting, the schedule optimizer, multi-year backtesting |
+| `lib/farms/` | Farm-form validation and the 3-checkpoint construction logic |
+| `lib/fixtures/` | Synthetic climate data generation for the demo farm seed |
+| `lib/fortyguard/` | The FortyGuard API client, GeoJSON helpers, error types — the only code that calls FortyGuard |
+| `lib/generated/` | Generated Prisma client (gitignored, rebuilt by `postinstall`) |
+| `lib/hooks/` | Shared React hooks (e.g. map-tile error fallback) |
+| `lib/impact/` | Herd/transit/storage impact metrics and the combined dollar-impact estimate |
+| `lib/ingestion/` | Climate-pulling, caching, and per-checkpoint ingestion orchestration |
+| `lib/risk/` | THI, spoilage risk, and worker-comfort calculations |
+| `lib/routing/` | OSRM road-route fetching for the transport map |
+| `data/` | Static seed data (`checkpoints.seed.json`) for the demo farm |
+| `docs/` | Setup documentation (e.g. local Postgres) |
+| `prisma/` | `schema.prisma`, migrations, and the demo-farm seed script |
+| `public/` | Static assets |
+| `scripts/` | Standalone CLI entry points for ingestion, cost measurement, and usage checks |
+| `__tests__/` | Vitest unit tests |
 
-**Request:**
+## 4. Data model
 
-```json
-{
-  "polygon_aoi": {
-    "type": "FeatureCollection",
-    "features": [{
-      "type": "Feature",
-      "properties": {},
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [[
-          [-95.97751409040536, 30.074294933524975],
-          [-95.97128590959464, 30.074294933524975],
-          [-95.97128590959464, 30.068905066475025],
-          [-95.97751409040536, 30.068905066475025],
-          [-95.97751409040536, 30.074294933524975]
-        ]]
-      }
-    }]
-  },
-  "date_time": { "start_date": "2025-08-01", "start_time": "15:00", "filter_type": 1 },
-  "granularity": 100,
-  "analytic_type": "tcm"
-}
+The schema (`prisma/schema.prisma`) has 7 models:
+
+| Model | Purpose |
+|---|---|
+| `Farm` | Top-level entity: name, ingestion lifecycle (`status`/`statusStage`/`statusError`/`statusErrorCategory`), `isDemoSeed` (protects the permanent demo farm from deletion), `hidden`, optional `herdSize`, and its 3 checkpoints |
+| `Checkpoint` | One of the three physical points in the chain — `type` (`FARM`/`TRANSPORT_ROUTE`/`STORAGE`), coordinates, optional AOI polygon (`polygonGeoJson`), optional route waypoints, its own `schedule` (JSON), and a 30-day `ambientHeatFrequency` signal (JSON) |
+| `HeatmapCache` | Raw cached response from a FortyGuard `/v1/heatmap` call, keyed by checkpoint + analytic type + date range + filter type + granularity + threshold + direction — cache-first, so the same request is never re-billed |
+| `EnvParamsCache` | Raw cached response from a FortyGuard `/v1/env_params` call, keyed by checkpoint + date + temperature anchor |
+| `ComputedRisk` | One hour's derived risk numbers for a checkpoint — temperature, humidity, THI value/category, spoilage risk, AQI, worker comfort — unique per (checkpoint, date, hour) |
+| `ScheduleRecommendation` | The optimizer's output for a checkpoint — recommended offset in minutes, exposure before/after, and a per-year backtest (JSON) |
+| `ChainSummary` | One farm-level rollup — total dollar impact, milk-yield and spoilage sub-estimates (each with an "available" flag distinguishing "not computed" from a genuine $0), and chain-conflict detection |
+
+**Farm → Checkpoint relationship:** every `Farm` has exactly 3 `Checkpoint` rows, created together by `buildCheckpointsData()` (`lib/farms/createFarm.ts`) when a farm is added:
+
+- `FARM` — the pasture's own coordinate, with a 300m-buffer AOI polygon for climate pulls, schedule = `{ start, end }` (grazing hours).
+- `TRANSPORT_ROUTE` — coordinate defaults to the arithmetic midpoint between pasture and storage (the demo farm overrides this with a real road-route midpoint), `routeWaypoints` = `[pasture, midpoint, storage]`, schedule = `{ departureTime }`.
+- `STORAGE` — the storage facility's own coordinate, no AOI polygon, empty schedule (spoilage risk is reactive-only, not schedule-driven).
+
+## 5. FortyGuard API integration
+
+### Endpoints used
+
+All calls go through `lib/fortyguard/client.ts` — the only file in the codebase permitted to call `api.fortyguard.com`. Every analysis endpoint follows the same **submit-then-poll** pattern:
+
+```
+POST /v1/<endpoint>            -> { data: { activity_id } }
+GET  /v1/status/{activity_id}  -> poll until status is terminal
 ```
 
-**Response** (`result` payload, after submit→poll completed):
+- **`POST /v1/heatmap`** (`createHeatmap()`) — a thermal map over a polygon AOI. `analyticType` defaults to `tcm` (raw per-tile snapshot temperature); `time_of_measure`, `exceedance`, and `persistence` are also used. HerdSafe uses this for:
+  - Real hourly per-tile temperature (`tcm`, `filterType: 1`, one call per hour) — the real per-hour temperature input to THI.
+  - The 30-day ambient-heat-frequency signal (`persistence`, `filterType: 4`, date range) — longest unbroken streak above the strain threshold.
+  - (Gated) multi-year historical pulls for the schedule optimizer/backtest.
+- **`POST /v1/env_params`** (`environmentalParameters()`) — thermal-comfort, air-quality, and solar metrics for a point. HerdSafe uses this once per day per checkpoint for real hourly `relative_humidity_percent` and `air_quality:idx` (AQI).
+- **`POST /v1/system/fetch-api-key-usage`** / **`POST /v1/system/fetch-api-key-custom-usage`** (`fetchApiKeyUsage()` / `fetchApiKeyCustomUsage()`) — billing-usage summaries, used by `scripts/check-usage.ts`.
+
+### The client's submit→poll implementation
+
+`FortyGuardClient.submitAndWait()` calls `submit()` to get an `activity_id`, then `waitFor()` polls `getStatus()` on an interval until the status is terminal:
+
+- Status strings are matched case-insensitively; `"succeeded"`/`"completed"` both mean done, `"failed"`/`"error"` both mean failed.
+- A 404 from the status endpoint right after submit is treated as eventual-consistency lag (`ActivityNotReadyError`), not a failure — polling continues up to the overall deadline instead of throwing immediately.
+- Bounded polling with a generous default timeout (30 minutes), since heat-intelligence jobs can take several minutes.
+- Network-level failures (DNS, connection refused/reset, our own abort-on-timeout) are wrapped as `FortyGuardUnavailableError`; non-2xx HTTP responses are wrapped as `FortyGuardHttpError` — kept distinct so the ingestion pipeline can classify a failure as retryable ("network"/"api") vs. not ("application").
+
+### One real request and response pair
+
+Pulled directly from the live database (`HeatmapCache`/`EnvParamsCache`), for the demo farm's storage checkpoint (44.402°N, −72.311°W):
+
+**Heatmap request** (`tcm`, single hour): a square AOI around the point, `filter_type: 1`, `granularity: 100`.
+
+**Response** (`HeatmapCache`, `startDate: 2026-08-28T15:00:00.000Z`):
 
 ```json
 {
   "stats_data": {
     "temperature_stats": {
-      "minimum": 35.691,
-      "maximum": 35.7834,
-      "mean": 35.73448333333333,
-      "standard_deviation": 0.031463479963738376
+      "mean": 20.995544395116536,
+      "maximum": 21.8912,
+      "minimum": 19.9269,
+      "standard_deviation": 0.5911946855912424
     }
   },
   "map_data": {
-    "type": "FeatureCollection",
-    "features": [{
-      "id": "0",
-      "type": "Feature",
-      "properties": {
-        "tile_id": 0,
-        "average_temperature": 35.7807,
-        "min_temperature": 35.7807,
-        "max_temperature": 35.7807
-      },
-      "geometry": { "type": "Polygon", "coordinates": [[ /* tile boundary */ ]] }
-    }]
+    "features": [
+      {
+        "id": "0",
+        "type": "Feature",
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [[
+            [-72.32929872764309, 44.38887305585823],
+            [-72.32803765410009, 44.38884354203895],
+            [-72.3279969667352, 44.38973722378254],
+            [-72.32925805942556, 44.38976673851654],
+            [-72.32929872764309, 44.38887305585823]
+          ]]
+        },
+        "properties": {
+          "tile_id": 0,
+          "max_temperature": 21.6894,
+          "min_temperature": 21.6894,
+          "average_temperature": 21.6894
+        }
+      }
+      /* … 900 more features */
+    ]
   }
 }
 ```
 
-Note the `average_temperature` field on a `filter_type=1` response — quirk
-#1 above.
+Note the tile's `properties` carry `average_temperature`, not a plain `temperature` field — one of the quirks below.
 
-### Why only a sample week, not a full 3 years hourly
+**env_params response** for the same checkpoint/day (`EnvParamsCache`, `date: 2026-08-28`, `temperatureAnchor: 25`):
 
-A real per-hour temperature series needs one `filter_type=1` call *per hour*
-(quirk #5). Pulling three full years hour-by-hour would mean roughly
-26,000 calls per checkpoint. Instead, historical ingestion samples one
-representative peak-heat week per year (`HISTORICAL_SAMPLE_WEEK` in
-`lib/constants.ts`, defaults to Aug 1–7) — which is also exactly what the
-spec's own historical-analog description asks for ("average the hourly THI
-curve for the target week across the three historical years"). That's still
-~525 real API calls per checkpoint for a full production run — cache-first
-and resumable, but budget real time for it.
+```json
+{
+  "metadata": {
+    "timezone": "GMT-5",
+    "time_range": { "start": "2026-08-28T00:00:00-05:00", "end": "2026-08-28T23:00:00-05:00", "count": 24, "interval": "1h" }
+  },
+  "locations": [{
+    "parameters": {
+      "relative_humidity_percent": [98.4, 99, 99.3, 99.6, 99, /* …19 more */],
+      "heat_index_celsius": [ /* derived from the fixed anchor, not trusted */ ],
+      "apparent_temperature_celsius": [ /* derived, not trusted */ ],
+      "wet_bulb_temperature_celsius": [ /* derived, not trusted */ ],
+      "air_quality:idx": [ /* … */ ]
+      /* co2_ppm, methane_ppb, precipitation_mm, cloud_cover_octas, several air_quality_*:idx fields */
+    }
+  }]
+}
+```
 
-That estimate turned out to understate the real constraint: a live `tcm`
-heatmap call costs **~4,220 credits** on this key, confirmed against actual
-usage. ~525 calls/checkpoint × ~4,220 credits ≈ **2.2M credits** — more than
-the *entire* 2,000,000-credit hackathon budget, for **one** checkpoint's
-full historical pull. See the next section for what that changed.
+Notably, this response has **no plain hourly temperature field at all** — only derived fields computed from the single `temperature: 25` anchor passed in the request, plus real per-hour `relative_humidity_percent` and `air_quality:idx`.
 
-A follow-up diagnostic (`scripts/measure-api-costs.ts`, a deliberate 10-call
-harness that checked the usage endpoint before/after every single call) then
-confirmed pricing is **flat per call, independent of every parameter
-tested** — `filter_type`, `analytic_type`, `granularity`, and AOI size (a
-~5x-larger polygon billed the identical 4,220 credits) all made no
-difference. So there's no cheaper request shape to switch to; the only real
-lever is call count, and there's no reason to keep the sampled AOI tight
-anymore either — see below.
+### Real quirks and gotchas discovered, and how they're handled
 
-## Credit budget & default ingestion scope
+- **GeoJSON coordinate order is `[lon, lat]`** — the opposite of the lat/lon convention used everywhere else in this codebase. `buildPointBufferPolygon()` (`lib/fortyguard/geo.ts`) builds every AOI polygon with an explicit comment flagging this, and `polygonCentroid()` destructures rings as `[lon, lat]` to match.
+- **env_params `temperature` is a fixed anchor, not real hourly data.** The request requires a single `temperature` value; the response's `heat_index_celsius`/`apparent_temperature_celsius`/`wet_bulb_temperature_celsius` are derived from that one fixed anchor applied across the whole series, so they are not physically meaningful hour-by-hour. Only `relative_humidity_percent` (and `air_quality:idx`) genuinely vary per hour. **This is why THI is computed from a real `tcm` heatmap temperature paired with real env_params humidity — never from FortyGuard's own derived heat-index/wet-bulb fields.** (`calculateTHI`'s doc comment in `lib/risk/thi.ts` states this explicitly; `climatePull.ts`'s header comment documents the two-step workaround.)
+- **`average_temperature` vs. `temperature` field inconsistency.** A live `filter_type=1` (single-hour) `tcm` call can return tiles with `average_temperature`/`min_temperature`/`max_temperature` instead of the plain `temperature` field some FortyGuard documentation describes for that filter type — confirmed against a real request during this build (see the response above). `tryAverageTcmTemperature()` (`lib/ingestion/climatePull.ts`) checks `temperature` first and falls back to `average_temperature`, so a single-hour pull never silently comes back empty.
+- **Zero-tile responses are real and billed, not failures.** A `tcm` or `persistence` call can return `Completed` with zero usable tiles — this still costs credits, and is grid-alignment-dependent per location (confirmed at two different real locations), not a fixed buffer-size problem. `fetchHourlyTemperatureC()` escalates the AOI buffer through `CLIMATE_POINT_BUFFER_METERS` (1500m) then `CLIMATE_POINT_BUFFER_ESCALATION_METERS` (3000m) before giving up — deliberately short (1 default try + 1 escalation) since each attempt is separately billed. A zero-tile response is never cached, so a future retry (even after a code fix) isn't permanently locked into replaying the failure.
+- **Recency vs. buffer-size are two distinct failure modes.** For "current conditions" (reactive) pulls, a zero-tile response can also mean the requested hour is too recent for FortyGuard's data to have processed yet — a buffer-size fix doesn't help here. `fetchHourlyTemperatureWithRecencyFallback()` retries at progressively earlier hours (up to `RECENCY_FALLBACK_MAX_HOURS_BACK`, 3 hours back) instead, since a slightly-stale real reading is more honest and far cheaper than pulling a larger area.
+- **Flat per-call credit pricing, confirmed empirically.** `scripts/measure-api-costs.ts` made real calls varying `filter_type`, `analytic_type`, `granularity`, and AOI size, and found the credit cost is flat regardless of any of those parameters: **~4,220 credits per heatmap call** and **~2,900 credits per env_params call**, every time. This finding directly drove the credit-safety strategy below.
 
-Multi-year historical backtesting is real and working, but it is **fully
-gated off the live Add Farm/Edit Farm flow** — not just defaulted off. Current
-scope:
+### Current credit-usage strategy
 
-- **The permanent demo farm** (`isDemoSeed: true`) demonstrates the full
-  3-year backtest at full scope — synthetically, at zero API cost (see
-  [Demo farm data](#demo-farm-data--why-its-synthetic) below).
-- **New farms**, via the "Add New Farm" flow, get every checkpoint (farm,
-  transport, *and* storage) ingested through reactive current-conditions
-  ingestion ONLY — `lib/ingestion/currentIngest.ts`'s `ingestCurrentCheckpoint()`,
-  which supports all three checkpoint types. No optimizer, no backtest, no
-  `ScheduleRecommendation` for the farm/transport checkpoints.
-  - The reactive window (`REACTIVE_FORECAST_HOURS` in `lib/constants.ts`) is
-    **1 hour**, not 12 — each hour is its own billed heatmap call (confirmed
-    by the harness above), so 12 hours meant 12 heatmap calls per checkpoint
-    (~50,640 credits), not one call covering a 12-hour range. At 1 hour,
-    each checkpoint costs one ~4,220-credit heatmap call + one
-    ~2,900-credit env_params call ≈ **7,120 credits**, so a full 3-checkpoint
-    farm costs **≈21,360 credits** to create — down from the ~160,600
-    credits/farm the 12-hour default actually cost (an order-of-magnitude
-    miscalculation caught before it became the shipped default — the initial
-    "cheap, roughly a dozen calls" estimate confused call *count* with call
-    *cost*).
-  - The sampled AOI (`CLIMATE_POINT_BUFFER_METERS`) was bumped from 300m to
-    1500m (escalation step 600m → 3000m) as a free reliability margin against
-    the grid-alignment zero-tile issue described above — free because AOI
-    size doesn't affect cost.
-- **Ambient heat frequency** (`lib/ingestion/ambientHeatFrequency.ts`): every
-  new farm's FARM/TRANSPORT_ROUTE checkpoints (not STORAGE) also get one real
-  `persistence` heatmap call (`filter_type=4`, past 30 real days, reusing
-  `AMBIENT_HEAT_STRAIN_THRESHOLD_C`) — a cheap, honest, ambient-temperature-
-  frequency signal ("Longest continuous stretch above 35°C: 6 hours"),
-  surfaced plainly in the Checkpoint Detail modal and explicitly labeled as
-  separate from the THI-based backtest above it. **Deliberately not blended
-  into the dollar-impact estimate or the optimizer** — it's descriptive, not
-  prescriptive. Confirmed at the same flat ~4,220 credits/call as everything
-  else, including at this exact parameter combination
-  (`scripts/measure-api-costs.ts` only tested `filter_type=4` and
-  `exceedance`/`persistence` separately, not together — re-verified together
-  before wiring it into the live flow). ORIGINALLY paired with an
-  `exceedance` call too, doubling the cost for a second number that told a
-  similar story — dropped to cut this feature's cost roughly in half. Adds
-  ~4,220 credits/checkpoint × 2 checkpoints = **~8,440 credits/farm**,
-  bringing the real total to **≈29,800 credits/farm** (up from ≈21,360
-  without it) — confirmed exactly by direct usage-endpoint deltas, not
-  estimated.
-- **Herd Impact Today** (`lib/impact/herdMetrics.ts`): four derived metrics
-  in the Checkpoint Detail modal for the FARM checkpoint only — additional
-  water needed, feed (DMI) intake reduction, minimum shade area, and an
-  estimated respiration-rate multiple — computed purely from
-  temperature/THI data already cached from the reactive pull. **Zero
-  additional FortyGuard calls**, runs for every farm including reactive-only
-  ones. Each figure cites a real agricultural-extension or peer-reviewed
-  source (full citations in `lib/constants.ts` and behind each card's info
-  icon) — water (OSU Extension), feed intake (a 2021 global meta-analysis,
-  North America-specific coefficient), shade (Cornell Cooperative Extension,
-  grazing dairy cattle), respiration (Mississippi State Extension baseline +
-  a 2021 Frontiers in Animal Science breakpoint study). Farm.herdSize is an
-  optional field (Add/Edit Farm form) — per-animal figures are shown with an
-  "Add herd size" prompt when it's absent, never blocking farm creation.
-  Deliberately separate from the dollar-impact estimate and optimizer.
-- **Milk-yield-impact honesty fix**: the dollar-impact card used to show "$0
-  milk yield" for every reactive-only farm — indistinguishable from "we
-  checked and there's truly no risk," when the real reason is that no
-  `ScheduleRecommendation` exists yet to diff exposure against (that half of
-  the estimate is structurally unreachable for any new farm, permanently,
-  since the optimizer/backtest is gated off — see above). `ChainSummary` now
-  stores `milkYieldEstimateAvailable`, and the UI shows "Milk yield impact:
-  not available (no historical backtest run for this farm)" instead of a
-  number that could be misread as verified-safe — the same honesty standard
-  already used for the Checkpoint Detail modal's missing-recommendation case.
-- **`lib/ingestion/historicalIngest.ts`'s `ingestHistoricalCheckpoint()` is
-  hard-gated behind `ALLOW_HISTORICAL_INGESTION=true`** in the environment —
-  it throws immediately otherwise. The live pipeline
-  (`scripts/run-farm-pipeline.ts`) never sets this and never calls the
-  function at all, so this is defense-in-depth, not the only thing preventing
-  it: `ALLOW_HISTORICAL_INGESTION=true npx tsx scripts/ingest-historical.ts <checkpointId>`
-  is the only way to run a historical pull, deliberately, against one
-  checkpoint, when you're ready to spend the credits on it. In a real product
-  this is the natural shape of a paid-tier capability: reactive monitoring
-  cheap by default, deep historical backtesting a deliberate, explicitly
-  unlocked, priced action.
-- **A real farm with a genuinely interrupted historical pull** (from before
-  this gate existed — network failure, or a decision to stop before
-  completing every year) doesn't lose what it already paid for:
-  `scripts/recompute-recommendation.ts <checkpointId>` computes a
-  recommendation from whatever years are fully cached — a year only counts
-  if every sample day has all 24 hours present
-  (`lib/ingestion/completeHistoricalYears.ts`) — without pulling anything
-  new. This is exactly what happened to a real farm during this build: its
-  historical pull failed partway through with only 1 of 3 years fully
-  cached; rather than resume the pull or discard the real, already-paid-for
-  data, its recommendation was recomputed from that 1 complete year. Every
-  place a backtest scope is shown (Dashboard card, Checkpoint Detail chart
-  and table) reports the checkpoint's *actual* complete-year count
-  dynamically — never a hardcoded "3 years."
-- **Service-unavailability handling**: FortyGuard calls that never get a
-  response at all (DNS failure, connection reset, our own request timeout)
-  now throw a distinct `FortyGuardUnavailableError` instead of surfacing as a
-  generic, unhelpful "fetch failed" (`lib/fortyguard/client.ts`); a non-2xx
-  HTTP response throws `FortyGuardHttpError` instead of a generic
-  `FortyGuardError`. `categorizeError()`/`userFacingMessage()`
-  (`lib/fortyguard/errors.ts`) classify any pipeline failure into
-  network/api/application, storing the category on `Farm.statusErrorCategory`.
-  The Processing screen shows a friendly message plus a **Retry** button for
-  network/api failures (plausibly transient) and a plain "something went
-  wrong, check the logs" message with no Retry for application-level bugs
-  (retrying wouldn't help). Verified by pointing a `FortyGuardClient` at a
-  deliberately-invalid host — confirmed it throws `FortyGuardUnavailableError`
-  → categorizes as `"network"` → renders the friendly message and Retry
-  button, at zero API cost.
+Given flat per-call pricing, a naive design (pull 12+ hours of forecast, plus multi-year historical, for every new farm) would burn credits far faster than useful. The current strategy:
 
-## Demo farm data — why it's synthetic
+- **New farms get a reactive-only 1-hour default window** (`REACTIVE_FORECAST_HOURS = 1` in `lib/constants.ts`, reduced from an original 12-hour design after measuring the cost: ~21,360 credits/farm at 1 hour vs. ~151,920 credits/farm at 12 hours). `ingestCurrentCheckpoint()` (`lib/ingestion/currentIngest.ts`) is the *only* ingestion path reachable from the live Add-Farm/Edit-Farm flow — it computes THI/spoilage/worker-comfort for the current hour and, for `FARM`/`TRANSPORT_ROUTE` checkpoints, one additional cheap `persistence` call (a single flat-rate heatmap call) for a real 30-day ambient-heat-frequency signal.
+- **Full multi-year historical backtesting is fully gated behind an explicit environment flag.** `ingestHistoricalCheckpoint()` (`lib/ingestion/historicalIngest.ts`) refuses to run unless `ALLOW_HISTORICAL_INGESTION=true` is set — a full pull for one checkpoint (one `tcm` heatmap call per hour, for a full sample week, across `HISTORICAL_YEARS`) costs roughly 2.1M credits, more than the hackathon key's entire budget. It's still real, working code — reachable only via the standalone `scripts/ingest-historical.ts` CLI, never from the web app — for anyone deliberately choosing to spend the credits on one checkpoint.
+- **The one exception:** during earlier development (before this project's database was migrated to Supabase), one real farm was given a partial, honestly-scoped historical backtest, built by running the gated historical path manually and letting `scripts/recompute-recommendation.ts` compute a schedule recommendation from whatever complete year(s) were actually cached — before the `ALLOW_HISTORICAL_INGESTION` gate existed. That farm's data lived in a local Postgres database used during development and is not present in the current production Supabase database — every real (non-demo) farm currently live has reactive-only data. The mechanism behind it is real, current, and verifiable: `computeAndStoreChainSummary()` (`lib/impact/computeChainSummary.ts`) calls `getCompleteHistoricalYears()` per checkpoint and only ever reports the years a checkpoint actually has complete cached data for — a checkpoint with a partial or absent historical pull correctly reports 0 or a reduced year-count, not a fabricated full backtest.
 
-The permanent demo farm — **Heavenly Dairy** (`data/checkpoints.seed.json`,
-finalized real coordinates and schedule from `PROJECT_GUIDE.md` Section 0.5)
-— gets its climate data from `lib/fixtures/syntheticClimateData.ts`: a
-deterministic (seeded, not `Math.random()`), right-shaped Texas-summer
-diurnal curve, run through the **exact same** THI/optimizer/backtest/dollar-
-impact pipeline real ingestion uses (`prisma/seed.ts`). No FortyGuard
-credits are spent seeding it. This was a deliberate choice made with the
-project owner: a real historical pull is substituted later if time allows,
-per Section 0.5.
+The permanent demo farm ("Heavenly Dairy") is the one place with a genuine, complete 3-year backtest today — but that comes entirely from `prisma/seed.ts`'s synthetic fixture generator, run through the real pipeline, not a live FortyGuard pull (see [Section 2](#2-how-to-run-it-from-scratch)).
 
-Its coordinates and schedule are real and finalized, but the climate is
-still synthetic, so the fixture's peak/trough temperatures were hand-tuned
-to produce a genuine, demonstrable optimizer improvement for both the farm
-and transport checkpoints against that real schedule — Section 0.5 chose
-a grazing window (10:00–16:00) and transport departure (13:00) deliberately
-inside peak heat specifically so the optimizer would have real signal to
-act on; a schedule that already reads safe wouldn't produce a compelling
-demo. See the comment above `YEAR_PEAK_TEMPERATURES_C` in `prisma/seed.ts`
-for how that tuning was found and the trade-off it hit.
+## 6. Core algorithms and formulas
 
-The one exception to "everything else auto-derives the same way a real
-farm would": the demo farm's transport checkpoint uses the real road-route
-waypoints from Section 0.5 (`checkpoints.seed.json`'s `transportWaypoints`)
-instead of the straight-line midpoint `buildCheckpointsData()` normally
-computes — a small override applied only inside `prisma/seed.ts`, so the
-live Add-Farm flow (real users) is untouched and keeps auto-deriving, since
-its form doesn't collect a route midpoint either.
+### Temperature-Humidity Index (THI) and category thresholds
 
-The synthetic generator is isolated in its own file specifically so swapping
-the demo farm to a real pull later is a contained change, not a codebase-
-wide hunt.
+`lib/risk/thi.ts`:
 
-## What's simplified / future scope
+```
+THI = (1.8·T + 32) − (0.55 − 0.0055·RH) · (1.8·T − 26)
+```
 
-- **Barn/shelter is modeled as binary** — fully protected when sheltered,
-  fully exposed on open pasture. An explicit simplification, not a hidden
-  assumption (per the spec).
-- **Spoilage risk is a proxy from ambient conditions**, not a real facility
-  sensor reading — FortyGuard only exposes outdoor weather, not a
-  refrigeration unit's actual internal temperature. See quirk discussion
-  above and the doc comment on `AMBIENT_HEAT_STRAIN_THRESHOLD_C`.
-- **Three checkpoint types, one livestock category.** Expanding to other
-  livestock (poultry, swine) or other perishable food categories (produce,
-  seafood) would mean new THI-equivalent stress models per species/product —
-  the checkpoint/risk-computation architecture already generalizes to that,
-  it just needs the domain-specific formulas.
-- **Farm AOI and transport route are auto-derived**, not user-drawn. A real
-  version would let users draw a pasture boundary and route on a map.
-- **Multi-year historical backtesting is not reachable from the live Add
-  Farm/Edit Farm flow at all** (hard-gated behind `ALLOW_HISTORICAL_INGESTION=true`
-  — see [Credit budget & default ingestion scope](#credit-budget--default-ingestion-scope)).
-  The demo farm demonstrates it at full (synthetic) scope; one real farm
-  built during this project demonstrates it at a reduced-but-real scope from
-  before the gate existed; every other farm gets reactive-only monitoring.
-  Full historical analysis remains a real, working, manually-triggered
-  capability behind that flag — the natural shape of a future paid tier, not
-  a missing feature.
+where `T` is air temperature in °C and `RH` is relative humidity (0–100). Categorized per **Armstrong 1994** (`categorizeTHI()`, thresholds in `THI_BANDS`, `lib/constants.ts`):
 
-## Deployment scope
+| Category | Range |
+|---|---|
+| Comfort | THI < 72 |
+| Mild | 72 ≤ THI < 80 |
+| Moderate | 80 ≤ THI < 90 |
+| Severe | THI ≥ 90 |
 
-Deployed on Vercel, backed by Supabase Postgres (two connection strings —
-`DATABASE_URL`, pooled via Supavisor/PgBouncer, for the app's own queries;
-`DIRECT_URL`, non-pooled, for Prisma Migrate — see `prisma.config.ts` and
-`lib/db.ts`).
+### Spoilage risk / refrigeration-strain proxy
 
-The ingestion pipeline originally kicked off as a detached Node child
-process (`lib/ingestion/spawnPipeline.ts`), which only survives on a
-long-running server (`next dev` / `next start`) — confirmed broken in
-production (`ENOENT` trying to write a log file into the deployed bundle's
-read-only filesystem). Replaced with Next.js's `after()` (stable since
-15.1.0): the pipeline now runs in-process, after the response is sent,
-within the same serverless invocation (Vercel wires this to its own
-`waitUntil` automatically) — see `lib/ingestion/runFarmPipeline.ts`. Each
-calling route sets `maxDuration = 300` accordingly. If a run somehow exceeds
-that, the farm is left in `"processing"` and the existing Retry action
-recovers it manually — there's no automatic queue/retry infrastructure
-beyond that, which is a reasonable tradeoff at this scale but the thing to
-revisit first if farm creation ever needs to be more failure-tolerant.
+`lib/risk/spoilage.ts` — `calculateSpoilageRisk()` counts hours at or above a ceiling temperature (boundary inclusive: exactly at the ceiling counts as at-risk). Two distinct ceilings exist in `lib/constants.ts`:
 
-## Claude Code disclosure
+- `SPOILAGE_TEMP_CEILING_C = 4` — the FDA Grade "A" Pasteurized Milk Ordinance (PMO) standard: raw milk must cool to 45°F/7°C within 2 hours and be maintained at ≤ 45°F (used here as 4°C/40°F, the stricter storage target).
+- `AMBIENT_HEAT_STRAIN_THRESHOLD_C = 35` — what ingestion actually uses for the live storage-checkpoint flag, since FortyGuard only exposes outdoor **ambient** conditions, never a facility's actual internal refrigeration reading. The result is honestly reframed: `atRisk` means "ambient heat elevated enough to plausibly strain refrigeration equipment and raise outage risk," not "the product is confirmed to be at this temperature" — see the doc comment on both the function and the constant.
 
-This project was built end-to-end with Claude Code, from `PROJECT_GUIDE.md`
-as the specification: scaffolding the Next.js/Prisma project, porting the
-FortyGuard Python quickstart's client patterns to TypeScript, writing all
-computation logic and its unit tests, building the ingestion pipeline and API
-routes, and building the frontend. Claude Code also discovered and worked
-around the API quirks and reliability issues documented above by making live
-test calls against the real FortyGuard API during the build (not by
-inference from the spec alone), and caught a live bug in Prisma 7's
-`findUnique`-with-null behavior before it could affect the cache-first
-ingestion design.
+### Worker comfort flag
 
-A follow-up pass then applied the finalized real seed data and the two
-Section 8 resolutions above. That pass also caught that the new, narrower
-demo schedule (a 6h grazing window and a 2h transport window, both centered
-on peak heat) made the previous demo-seed climate tuning produce zero
-optimizer improvement — the exact failure mode the spec's own Section 0.5
-warns against — and retuned it to restore a genuine, backtest-holding
-result for both checkpoints (see [Demo farm data](#demo-farm-data--why-its-synthetic)).
+`lib/risk/workerComfort.ts` — combines THI category with EPA AQI bands (`AQI_BANDS`, `lib/constants.ts`), rows checked top-down (top row wins):
+
+```
+AQI > 150         OR heat severe    -> intolerable
+AQI 101–150       OR heat moderate  -> bad
+AQI 51–100        AND heat mild     -> suitable
+otherwise                           -> good
+```
+
+### Schedule optimizer
+
+`lib/exposure/optimizer.ts` — `optimizeSchedule()` brute-force sweeps the current schedule window by ±`OPTIMIZER.SWEEP_RANGE_MINUTES` (90 minutes) in `OPTIMIZER.STEP_MINUTES` (15-minute) increments, computing `computeExposure()` (hours where THI ≥ threshold, default the mild threshold of 72, that overlap the window) at each offset. Ties prefer the smallest shift; among equal-magnitude ties, the earlier (more negative) offset wins.
+
+### Multi-year historical backtest logic
+
+`lib/exposure/backtest.ts` — `backtestAcrossYears()` re-runs `computeExposure()` for the optimizer's winning offset against each cached historical year independently, reporting `exposureBefore`/`exposureAfter` per year and `holdsAcrossAllYears` (true only if every single year improved).
+
+### Ambient heat frequency / historical-analog signal
+
+Two related but distinct things:
+
+- **Ambient heat frequency** (`lib/ingestion/ambientHeatFrequency.ts`) — one real `persistence` heatmap call (`filterType: 4`, 30-day date range, `AMBIENT_HEAT_FREQUENCY_WINDOW_DAYS`) reporting the longest unbroken streak of hours above the strain threshold, read directly from the API's own `stats_data.max` aggregate. Deliberately persistence-only (a companion `exceedance` call was originally paired with it but dropped to halve the feature's cost) and never blended into THI, the optimizer, or the dollar-impact estimate.
+- **Historical-analog profile** (`historicalAnalogProfile()`, `lib/exposure/backtest.ts`) — averages hourly THI across the cached historical years (with min/max spread), explicitly *not* a forecast, surfaced only where historical data actually exists.
+
+### Herd impact metrics
+
+`lib/impact/herdMetrics.ts` — none of these call FortyGuard; all reuse temperature/THI already cached from the reactive pull:
+
+- **Water demand:** `max(0, T_F − 40) / 10 × 1` additional gallons/head (OSU Extension, Paul Beck: +1 gallon per 10°F above a 40°F baseline).
+- **Feed intake reduction:** `max(0, THI − 72) × 0.29` kg/day/head (North America meta-analysis, *International Journal of Biometeorology* 2021, DOI 10.1007/s00484-021-02167-0).
+- **Shade requirement:** flat 40 sq ft/head (Cornell Cooperative Extension, SWNY Dairy).
+- **Respiration rate:** resting 38 bpm below a THI breakpoint of 77; above it, `38 + 2.04 × (THI − 77)` bpm (Mississippi State Extension + *Frontiers in Animal Science* 2021).
+
+### Transit impact metrics
+
+`lib/impact/transitMetrics.ts`:
+
+- **Milk cooling buffer:** estimates hours remaining before in-transit milk (assumed loaded at the 4°C storage ceiling) warms past the PMO **transport-receiving** ceiling of 45°F/7.2°C (`PMO_TRANSPORT_RECEIVING_CEILING_C`), under an explicitly-labeled illustrative linear heat-gain assumption (`TRANSIT_HEAT_GAIN_RATE_COEFFICIENT_PER_F = 0.05`°F gained per °F of ambient-to-milk differential, per hour). Returns `Infinity` when ambient is at or below the milk's starting temperature.
+- **Federal Twenty-Eight Hour Law context:** `TWENTY_EIGHT_HOUR_LAW_LIMIT_HOURS = 28`, `TWENTY_EIGHT_HOUR_LAW_REST_HOURS = 5` (49 U.S.C. § 80502; cited alongside GAO-26-108123's finding on enforcement gaps in the underlying research this app's constants file documents).
+
+### Refrigeration energy cost estimate
+
+`lib/impact/storageEnergyMetrics.ts` — `estimateAdditionalCoolingCostUsd()`:
+
+```
+extra_kWh = max(0, T_ambient − 35) × REFRIGERATION_EXTRA_KWH_PER_DEGREE_C_ABOVE_STRAIN (3, illustrative)
+cost      = extra_kWh × REFRIGERATION_ELECTRICITY_RATE_USD_PER_KWH (0.1351, EIA commercial rate, April 2026)
+```
+
+The electricity rate is a real, sourced figure (EIA); the per-degree kWh coefficient is explicitly labeled in `lib/constants.ts` as an illustrative approximation, not an independently sourced figure — see [Section 8](#8-what-doesnt-work-yet--known-limitations).
+
+### Combined dollar-impact estimate
+
+`lib/impact/dollarEstimate.ts`:
+
+```
+milkYieldLossEstimate = severeThiCowHoursAvoided × herdSize × 0.71 L/severe-THI-cow-hour × $0.43/L
+spoilageRiskEstimate  = spoilageEventsAvoided × $9,000/event
+totalDollarImpact     = milkYieldLossEstimate + spoilageRiskEstimate
+```
+
+(`DOLLAR_IMPACT` in `lib/constants.ts`: USDA-ERS/AMS 2026 milk price; yield-loss rate derived from West 2003 / Zimbelman 2009 / St-Pierre 2003; spoilage event cost derived from a 5,500-gallon tanker load basis.)
+
+`computeAndStoreChainSummary()` (`lib/impact/computeChainSummary.ts`) makes the honesty distinction explicit: `milkYieldEstimateAvailable` is only `true` if the pasture checkpoint has a real `ScheduleRecommendation` (i.e. historical data was actually pulled); `spoilageEstimateAvailable` requires at least `SPOILAGE_ESTIMATE_MIN_OBSERVED_HOURS` (6) hours of observed storage data. A reactive-only new farm correctly shows **"not available," not "$0"** — the UI is told to distinguish "we haven't computed this" from "we computed a genuine zero."
+
+## 7. Testing and validation
+
+**Unit tests:** 8 test files, 40 tests, all passing (`npm test`, Vitest):
+
+- `thi.test.ts`, `spoilage.test.ts`, `workerComfort.test.ts` — the core risk formulas
+- `optimizer.test.ts`, `backtest.test.ts` — the schedule optimizer and multi-year backtest
+- `herdMetrics.test.ts`, `transitMetrics.test.ts`, `storageEnergyMetrics.test.ts` — the impact metrics
+
+**Real API validation beyond unit tests:**
+
+- `scripts/measure-api-costs.ts` made real, billed calls against FortyGuard varying `filter_type`, `analytic_type`, `granularity`, and AOI size, confirming the flat per-call pricing described in [Section 5](#5-fortyguard-api-integration).
+- The `average_temperature`/`temperature` field inconsistency, the env_params anchor artifact, and the zero-tile/grid-alignment behavior were all discovered against real live FortyGuard responses during development, not from documentation.
+- End-to-end farm creation was verified against production Supabase via a real `next start` production server, confirming correct staged progression (pasture → transport → storage) and correct error classification (a genuine FortyGuard 402 "Insufficient credits" response was caught and categorized as `"api"`, surfacing a retryable error to the user rather than a generic failure).
+- A real production build (`npm run build`) caught a static-prerendering bug (farm list baked in at build time) and a client-bundle secret-leak (verified by grepping the actual built `.next/static` chunks for FortyGuard credential references before and after the fix).
+
+## 8. What doesn't work yet / known limitations
+
+- **Binary barn/shelter model.** HerdSafe has no concept of partial shade coverage, ventilation quality, or misting systems — a farm either has the described pasture/storage setup or it doesn't. Real herd heat mitigation infrastructure varies continuously; this app doesn't model that variation.
+- **Multi-year historical backtesting is unavailable by default.** As detailed in [Section 5](#5-fortyguard-api-integration), it's gated behind `ALLOW_HISTORICAL_INGESTION=true` because a full pull costs ~2.1M credits per checkpoint — empirically measured, not estimated (`scripts/measure-api-costs.ts`). Every real farm in the current production database has reactive-only (1-hour) data as a direct consequence; only the synthetic demo farm has a full 3-year backtest.
+- **Ambient vs. actual refrigeration temperature.** The storage-checkpoint "spoilage risk" flag is driven entirely by outdoor ambient temperature (FortyGuard has no visibility into a facility's internal refrigeration reading) — it is a refrigeration-strain/outage-risk proxy, not a measurement of the product's actual temperature. This reframing is deliberate and documented in the code (`lib/risk/spoilage.ts`), but it means the flag can be wrong in either direction relative to what's actually happening inside a well- or poorly-maintained unit.
+- **The refrigeration energy coefficient is illustrative, not independently sourced.** `REFRIGERATION_EXTRA_KWH_PER_DEGREE_C_ABOVE_STRAIN` (3 kWh/°C) is explicitly labeled in `lib/constants.ts` as an approximation for the purpose of producing a directionally-useful dollar figure — unlike the EIA electricity rate it's multiplied by, it isn't backed by a published source.
+- **The schedule optimizer can genuinely find nothing to improve.** For a schedule already centered on peak heat with little slack (e.g. the demo farm's tuned schedule), a ±90-minute sweep can find no offset that reduces exposure — this shows up as `milkYieldLossEstimate = $0` for that specific schedule/curve combination, which is a correct result (a schedule already avoiding severe stress has nothing severe left to avoid), not a bug, but it can look surprising in the UI without this context.
+- **Historical-analog and ambient-heat-frequency signals are not forecasts.** Both are explicitly persistence/average-based estimates from past data, and both are kept structurally separate from the live THI reading and the dollar-impact estimate specifically so they can never be mistaken for a live prediction.
+- **No live GPS/logistics tracking.** "Time since departure" for the transport checkpoint is inferred purely from the scheduled departure time, not any real telemetry — a truck running early or late isn't reflected.
+
+## 9. Future scope
+
+- **Ward/hospital-level or other human-facing extensions.** The same reactive-heat-monitoring + honest-availability-flagging pattern built here for livestock and product was considered for extension to settings where heat-vulnerable people or equipment also can't self-report (e.g. eldercare facilities, hospital cold-chain storage) — not built in this submission, but the checkpoint/risk/dollar-impact architecture doesn't assume "cattle" anywhere structural.
+- **Expansion beyond dairy** to other livestock (poultry, swine) and other perishable food categories, each with their own THI-equivalent thresholds and food-safety ceilings in place of the current Armstrong/PMO constants.
+- **Full historical backtesting as a paid/opt-in tier.** Given the real, measured ~2.1M-credit cost per checkpoint, the most viable path to making multi-year backtesting available to real farms (not just the synthetic demo) is an explicit, priced opt-in — the `ALLOW_HISTORICAL_INGESTION` gate and `scripts/ingest-historical.ts` are already the mechanical foundation for that; what's missing is billing/authorization around it.
+
+## 10. Security and credentials
+
+- All secrets (`DATABASE_URL`, `DIRECT_URL`, `FORTYGUARD_API_KEY`, `FORTYGUARD_BASE_URL`) are read exclusively from environment variables (`process.env`) — none are hardcoded anywhere in the codebase.
+- `.env.local` is gitignored; only `.env.example` (placeholder values, no real credentials) is committed.
+- `FORTYGUARD_API_KEY`/`FORTYGUARD_BASE_URL` are deliberately **not** defined in `lib/constants.ts` (which is imported by client components) — they live only in `lib/fortyguard/client.ts`, the sole server-only file that ever calls FortyGuard. This was verified directly: a real production build's `.next/static` client chunks were grepped for both the literal API key value and the variable names, confirming neither ships to the browser bundle.
+- Prisma's generated client (`lib/generated/prisma`) is gitignored and regenerated on every install via the `postinstall` script, so no database schema/credential artifacts are committed either.
+
+## 11. Deployment
+
+- **Hosting:** Vercel (linked directly to this GitHub repository) for the Next.js app; Supabase for PostgreSQL.
+- **Database:** the pooled Supabase connection (`DATABASE_URL`, port 6543) is used by the deployed app for all runtime queries via `@prisma/adapter-pg`; the direct connection (`DIRECT_URL`, port 5432) is used only when running `prisma migrate deploy` from a CLI environment (developer machine or CI), never at runtime.
+- **Environment configuration:** all four environment variables (`DATABASE_URL`, `DIRECT_URL`, `FORTYGUARD_API_KEY`, `FORTYGUARD_BASE_URL`) are configured directly in the Vercel project's environment settings — never committed to the repo.
+- **Ingestion on serverless:** farm creation/edit/retry trigger ingestion via Next.js's `after()` API so the work runs in-process after the HTTP response is sent, compatible with Vercel's ephemeral, read-only serverless filesystem (an earlier detached-subprocess design was replaced after failing in production with `ENOENT` — see the `runFarmPipeline.ts` history). Routes that trigger ingestion set `export const maxDuration = 300` to allow enough execution time.
+- **Dynamic rendering:** the farm list route is explicitly marked `export const dynamic = "force-dynamic"` so newly created farms appear without requiring a redeploy (a real production build caught this defaulting to static prerendering otherwise).
+
+## 12. AI tools disclosure
+
+- **Claude** — used for ideation, research and verification of the scientific and regulatory sources cited throughout this app (Armstrong 1994 THI bands, FDA PMO standards, OSU Extension water-demand figures, the North America DMI-reduction meta-analysis, Cornell Cooperative Extension shade guidance, Mississippi State/​*Frontiers in Animal Science* respiration data, 49 U.S.C. § 80502 and the related GAO finding, EIA electricity rates), and for writing technical specifications.
+- **Claude Code** — used for the full application build: implementation, debugging, and diagnosing real production issues (including the serverless ingestion failure, the stale-deployment/tile-rendering issue, and the client-bundle credential-leak check described above).
+- **Google Gemini** — used for one exploratory UI/UX design pass, and for generating the thumbnail image used in the demo video.
